@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "auto_file"
+version = "0.1.0"
+description = "Automated, 100% local file sorting, renaming, and organization system"
+requires-python = ">=3.12"
+dependencies = [
+    "typer",
+    "rich",
+    "pypdf",
+    "pillow",
+    "puremagic",
+    "watchdog",
+    "pytest",
+]
+
+[project.scripts]
+auto-file = "auto_file.cli:app"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
