@@ -7,6 +7,7 @@ import pytest
 from auto_file.storage.audit import (
     AuditLedger,
     AuditError,
+    RollbackCollisionError,
     RollbackError,
     RollbackVerificationError,
     RollbackMissingFileError,
@@ -28,6 +29,7 @@ def test_audit_lifecycle_and_rollback(tmp_path: Path):
     dest = tmp_path / "sorted" / "2026-01-01_source.txt"
     dest.parent.mkdir()
     dest.write_text("data")
+    src.unlink()
 
     event_id = ledger.record_event(
         run_id=run_id,
@@ -382,6 +384,90 @@ def test_empty_database_rollback(tmp_path: Path):
     ledger = AuditLedger(db_path)
     assert ledger.rollback_run() == []
     assert ledger.get_history() == []
+
+
+def test_rollback_collision_raises_strict(tmp_path: Path):
+    """Rollback raises RollbackCollisionError if target file already exists at original_path."""
+    db_path = tmp_path / "audit.db"
+    ledger = AuditLedger(db_path)
+    run_id = ledger.start_run(mode="cli_single", source_root="/inbox", target_root="/sorted")
+
+    src = tmp_path / "doc.txt"
+    dest = tmp_path / "sorted" / "doc.txt"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest_content = b"sorted payload"
+    dest.write_bytes(dest_content)
+
+    # A new file was created at original_path between sorting and rollback
+    src_content = b"new conflicting file at original path"
+    src.write_bytes(src_content)
+
+    ledger.record_event(
+        run_id=run_id,
+        original_path=str(src),
+        destination_path=str(dest),
+        sha256=_sha256(dest_content),
+        file_size=len(dest_content),
+        date_source="content",
+        date_value="2026-01-01",
+        description="doc",
+        laya_tool_selected="text_extractor",
+        laya_category_selected="Misc",
+        status="moved",
+    )
+
+    with pytest.raises(RollbackCollisionError) as exc_info:
+        ledger.rollback_run(run_id, strict=True)
+
+    assert "already exists" in str(exc_info.value)
+    # Neither file should have been overwritten or destroyed
+    assert src.exists()
+    assert src.read_bytes() == src_content
+    assert dest.exists()
+    assert dest.read_bytes() == dest_content
+
+    # Status remains 'moved'
+    events = ledger.get_events_for_run(run_id)
+    assert events[0]["status"] == "moved"
+
+
+def test_rollback_collision_skips_when_not_strict(tmp_path: Path):
+    """Rollback skips file if original_path exists and strict=False."""
+    db_path = tmp_path / "audit.db"
+    ledger = AuditLedger(db_path)
+    run_id = ledger.start_run(mode="cli_single", source_root="/inbox", target_root="/sorted")
+
+    src = tmp_path / "doc.txt"
+    dest = tmp_path / "sorted" / "doc.txt"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest_content = b"sorted payload"
+    dest.write_bytes(dest_content)
+
+    src_content = b"existing file"
+    src.write_bytes(src_content)
+
+    ledger.record_event(
+        run_id=run_id,
+        original_path=str(src),
+        destination_path=str(dest),
+        sha256=_sha256(dest_content),
+        file_size=len(dest_content),
+        date_source="content",
+        date_value="2026-01-01",
+        description="doc",
+        laya_tool_selected="text_extractor",
+        laya_category_selected="Misc",
+        status="moved",
+    )
+
+    undone = ledger.rollback_run(run_id, strict=False)
+    assert len(undone) == 1
+    assert undone[0]["status"] == "skipped"
+    assert "already exists" in undone[0]["error_message"]
+
+    # Files remain intact
+    assert src.read_bytes() == src_content
+    assert dest.read_bytes() == dest_content
 
 
 def test_context_manager_support(tmp_path: Path):

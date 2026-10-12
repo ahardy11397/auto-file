@@ -31,6 +31,13 @@ class RollbackMissingFileError(RollbackError, FileNotFoundError):
     """Exception raised when destination file to roll back is missing from disk."""
 
 
+class RollbackCollisionError(RollbackError):
+    """Exception raised when original destination path already exists during rollback."""
+
+
+RollbackTargetExistsError = RollbackCollisionError
+
+
 class AuditLedger:
     """Manages the SQLite audit ledger for pipeline runs and file movement events."""
 
@@ -462,12 +469,27 @@ class AuditLedger:
                         undone_events.append(event)
                         continue
 
-                # 3. Restore file to original_path
+                # 3. Verify original destination path does not already exist
+                if orig_path.exists():
+                    msg = f"Rollback target already exists: {orig_path}"
+                    if strict:
+                        raise RollbackCollisionError(msg)
+                    event["status"] = "skipped"
+                    event["error_message"] = msg
+                    self._conn.execute(
+                        "UPDATE file_events SET error_message = ? WHERE id = ?",
+                        (msg, event["id"]),
+                    )
+                    self._conn.commit()
+                    undone_events.append(event)
+                    continue
+
+                # 4. Restore file to original_path
                 orig_path.parent.mkdir(parents=True, exist_ok=True)
                 if dest_path.resolve() != orig_path.resolve():
                     shutil.move(str(dest_path), str(orig_path))
 
-                # 4. Update status in database
+                # 5. Update status in database
                 self._conn.execute(
                     "UPDATE file_events SET status = 'rolled_back' WHERE id = ?",
                     (event["id"],),
