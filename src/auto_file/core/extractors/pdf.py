@@ -24,26 +24,29 @@ class PDFExtractor(BaseExtractor):
 
         try:
             reader = pypdf.PdfReader(str(metadata.path))
-            page_count = len(reader.pages)
-            metadata_hints["page_count"] = page_count
+            try:
+                page_count = len(reader.pages)
+                metadata_hints["page_count"] = page_count
 
-            # Extract PDF document metadata if available
-            if reader.metadata:
-                try:
-                    for k, v in reader.metadata.items():
-                        if v and isinstance(v, str):
-                            clean_key = str(k).lstrip("/").lower()
-                            metadata_hints[clean_key] = v
-                except Exception:
-                    pass
+                # Extract PDF document metadata if available
+                if reader.metadata:
+                    try:
+                        for k, v in reader.metadata.items():
+                            if v and isinstance(v, str):
+                                clean_key = str(k).lstrip("/").lower()
+                                metadata_hints[clean_key] = v
+                    except Exception:
+                        pass
 
-            text_parts = []
-            for page in reader.pages:
-                extracted = page.extract_text()
-                if extracted:
-                    text_parts.append(extracted.strip())
+                text_parts = []
+                for page in reader.pages:
+                    extracted = page.extract_text()
+                    if extracted:
+                        text_parts.append(extracted.strip())
 
-            raw_text = "\n\n".join(text_parts).strip()
+                raw_text = "\n\n".join(text_parts).strip()
+            finally:
+                reader.close()
         except Exception as e:
             metadata_hints["pdf_read_error"] = str(e)
 
@@ -56,15 +59,21 @@ class PDFExtractor(BaseExtractor):
                 import pypdfium2
 
                 pdf = pypdfium2.PdfDocument(str(metadata.path))
-                if len(pdf) > 0:
-                    page = pdf[0]
-                    pil_image = page.render(scale=2).to_pil()
-                    if pil_image.mode != "RGB":
-                        pil_image = pil_image.convert("RGB")
-                    if pil_image.width > 1024 or pil_image.height > 1024:
-                        pil_image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
-                    image_content = pil_image
-                    metadata_hints["scanned_fallback"] = True
+                try:
+                    if len(pdf) > 0:
+                        page = pdf[0]
+                        try:
+                            pil_image = page.render(scale=2).to_pil()
+                            if pil_image.mode != "RGB":
+                                pil_image = pil_image.convert("RGB")
+                            if pil_image.width > 1024 or pil_image.height > 1024:
+                                pil_image.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                            image_content = pil_image.copy()
+                            metadata_hints["scanned_fallback"] = True
+                        finally:
+                            page.close()
+                finally:
+                    pdf.close()
             except Exception as e:
                 metadata_hints["render_error"] = str(e)
         else:

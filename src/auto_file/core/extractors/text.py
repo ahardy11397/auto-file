@@ -6,12 +6,13 @@ from auto_file.core.detector import FileMetadata
 from auto_file.core.extractors.base import BaseExtractor, ExtractedContent
 
 MAX_TEXT_CHARACTERS = 8000
+MAX_READ_BYTES = 32768
 
 
 class TextExtractor(BaseExtractor):
     """Extracts text content from plain text, markdown, CSV, JSON, and source code files,
 
-    handling encoding fallbacks and truncating up to 8,000 characters.
+    handling encoding fallbacks, bounded initial reads (32KB), and truncating up to 8,000 characters.
     """
 
     def extract(self, metadata: FileMetadata) -> ExtractedContent:
@@ -21,7 +22,7 @@ class TextExtractor(BaseExtractor):
         raw_bytes = b""
         try:
             with open(metadata.path, "rb") as f:
-                raw_bytes = f.read()
+                raw_bytes = f.read(MAX_READ_BYTES)
         except Exception as e:
             metadata_hints["read_error"] = str(e)
             return ExtractedContent(metadata_hints=metadata_hints)
@@ -40,9 +41,9 @@ class TextExtractor(BaseExtractor):
 
         metadata_hints["encoding"] = encoding_used
         total_chars = len(decoded_text)
-        metadata_hints["char_count"] = total_chars
+        metadata_hints["char_count"] = max(total_chars, metadata.size_bytes)
 
-        if total_chars > MAX_TEXT_CHARACTERS:
+        if total_chars > MAX_TEXT_CHARACTERS or metadata.size_bytes > len(raw_bytes):
             text_content = decoded_text[:MAX_TEXT_CHARACTERS]
             metadata_hints["truncated"] = True
         else:

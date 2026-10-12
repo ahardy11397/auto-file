@@ -269,3 +269,66 @@ def test_image_extractor_corrupted_file(tmp_path: Path):
     assert content.image_content is None
     assert "image_open_error" in content.metadata_hints
 
+
+def test_image_extractor_exif_transpose(tmp_path: Path):
+    f = tmp_path / "oriented.jpg"
+    # Create image of 100 wide x 200 high
+    img = Image.new("RGB", (100, 200), color="purple")
+    exif = img.getexif()
+    # Tag 274 is Orientation. Orientation 6 = rotate 90 degrees CW (width becomes 200, height 100)
+    exif[274] = 6
+    img.save(f, format="JPEG", exif=exif)
+
+    meta = detect_file_metadata(f)
+    extractor = get_extractor_for_tool("image_extractor")
+    content = extractor.extract(meta)
+
+    assert content.image_content is not None
+    # After exif_transpose, 100x200 oriented with tag 6 becomes 200x100
+    assert content.image_content.size == (200, 100)
+
+
+def test_text_extractor_large_bounded_read(tmp_path: Path):
+    f = tmp_path / "huge.txt"
+    f.write_text("Z" * 50000, encoding="utf-8")
+
+    meta = detect_file_metadata(f)
+    extractor = get_extractor_for_tool("text_extractor")
+    content = extractor.extract(meta)
+
+    assert content.text_content is not None
+    assert len(content.text_content) == 8000
+    assert content.metadata_hints.get("truncated") is True
+    assert content.metadata_hints.get("char_count") >= 50000
+
+
+def test_pdf_extractor_handles_closed_permits_rename(tmp_path: Path):
+    pdf_bytes = (
+        b"%PDF-1.4\n"
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n"
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n"
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >> endobj\n"
+        b"xref\n0 4\n"
+        b"0000000000 65535 f \n"
+        b"0000000009 00000 n \n"
+        b"0000000058 00000 n \n"
+        b"0000000115 00000 n \n"
+        b"trailer << /Size 4 /Root 1 0 R >>\n"
+        b"startxref\n185\n%%EOF\n"
+    )
+    f = tmp_path / "scanned_to_move.pdf"
+    f.write_bytes(pdf_bytes)
+
+    meta = detect_file_metadata(f)
+    extractor = get_extractor_for_tool("pdf_extractor")
+    content = extractor.extract(meta)
+
+    assert content.image_content is not None
+
+    # Immediate move / rename to verify no lingering file descriptors are held
+    dest = tmp_path / "scanned_moved.pdf"
+    f.rename(dest)
+    assert dest.exists()
+    assert not f.exists()
+
+

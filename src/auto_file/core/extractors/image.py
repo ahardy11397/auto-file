@@ -1,8 +1,8 @@
-"""Image content extractor with EXIF date parsing and scaling."""
+"""Image content extractor with EXIF date parsing, orientation transposition, and scaling."""
 
 import re
 from typing import Any
-from PIL import ExifTags, Image
+from PIL import ExifTags, Image, ImageOps
 
 from auto_file.core.detector import FileMetadata
 from auto_file.core.extractors.base import BaseExtractor, ExtractedContent
@@ -11,7 +11,8 @@ from auto_file.core.extractors.base import BaseExtractor, ExtractedContent
 class ImageExtractor(BaseExtractor):
     """Extracts image content, EXIF dates (DateTimeOriginal), and metadata.
 
-    Converts image to RGB mode and scales down to max 1024x1024 for visual understanding models.
+    Applies EXIF orientation transposition, converts to RGB mode, and scales down to max 1024x1024
+    for visual understanding models.
     """
 
     def extract(self, metadata: FileMetadata) -> ExtractedContent:
@@ -47,8 +48,13 @@ class ImageExtractor(BaseExtractor):
                 except Exception as e:
                     metadata_hints["exif_error"] = str(e)
 
+                # Apply EXIF orientation transposition if orientation tag present
+                oriented_img = ImageOps.exif_transpose(raw_img)
+                if oriented_img is None:
+                    oriented_img = raw_img
+
                 # Convert to RGB mode (handles RGBA, P, grayscale, etc.)
-                rgb_img = raw_img.convert("RGB")
+                rgb_img = oriented_img.convert("RGB")
 
                 # Scale to max 1024x1024 preserving aspect ratio
                 if rgb_img.width > 1024 or rgb_img.height > 1024:
