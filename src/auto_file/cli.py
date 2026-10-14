@@ -1,0 +1,455 @@
+"""Command-line interface for the Auto-File System.
+
+Provides commands for sorting files, inspecting run history,
+rolling back operations, and configuring default preferences.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Optional
+
+from rich.console import Console
+from rich.table import Table
+import typer
+
+from auto_file import __version__
+from auto_file.config import (
+    get_audit_db_path,
+    get_config_value,
+    get_default_dest,
+    get_default_source,
+    load_config,
+    set_config_value,
+)
+from auto_file.core.executor import FilePipelineExecutor, PipelineResult
+from auto_file.storage.audit import (
+    AuditLedger,
+    RollbackError,
+)
+
+app = typer.Typer(
+    help="Auto-File System: Automated local file organizer",
+    add_completion=False,
+)
+console = Console()
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    version: Optional[bool] = typer.Option(
+        None,
+        "--version",
+        "-v",
+        help="Show auto-file version and exit.",
+        is_eager=True,
+    ),
+) -> None:
+    """Auto-File System: 100% local, privacy-first automated file organizer."""
+    if version:
+        console.print(f"auto-file v{__version__}")
+        raise typer.Exit()
+    if ctx.invoked_subcommand is None:
+        console.print(ctx.get_help())
+        raise typer.Exit()
+
+
+@app.command()
+def sort(
+    path: Path = typer.Argument(
+        ...,
+        help="Path to source file or directory to organize.",
+        exists=False,
+    ),
+    dest: Optional[Path] = typer.Option(
+        None,
+        "--dest",
+        "-d",
+        help="Destination root directory for organized files.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview proposed destination and actions without modifying disk.",
+    ),
+    recursive: bool = typer.Option(
+        False,
+        "--recursive",
+        "-r",
+        help="Recursively process subdirectories if path is a directory.",
+    ),
+    audit_db: Optional[Path] = typer.Option(
+        None,
+        "--audit-db",
+        help="Path to SQLite audit ledger database.",
+    ),
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config-file",
+        help="Path to custom config JSON file.",
+    ),
+) -> None:
+    """Sort and organize a single file or an entire directory."""
+    if not path.exists():
+        console.print(f"[red]Error: Source path does not exist: {path}[/red]")
+        raise typer.Exit(code=1)
+
+    target_dest = dest or get_default_dest(config_file)
+    if target_dest is None:
+        console.print(
+            "[red]Error: Destination directory not specified. "
+            "Provide --dest or set default with 'auto-file config --set dest <path>'[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    resolved_audit_db = get_audit_db_path(config_file, audit_db)
+    ledger = AuditLedger(resolved_audit_db)
+    executor = FilePipelineExecutor(
+        target_root=target_dest,
+        audit_ledger=ledger,
+    )
+
+    results: list[PipelineResult] = []
+    if path.is_file():
+        results = [executor.process_file(path, dry_run=dry_run)]
+    elif path.is_dir():
+        results = executor.process_directory(
+            path,
+            dry_run=dry_run,
+            recursive=recursive,
+        )
+    else:
+        console.print(f"[red]Error: Unsupported file path type: {path}[/red]")
+        raise typer.Exit(code=1)
+
+    table = Table(
+        title="Auto-File Organization Summary" if not dry_run else "Auto-File Organization Preview",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Source File", style="white", overflow="fold")
+    table.add_column("Tool", style="magenta", no_wrap=True)
+    table.add_column("Date", style="green", no_wrap=True)
+    table.add_column("Proposed Destination", style="blue", overflow="fold")
+    table.add_column("Status", style="bold", no_wrap=True)
+
+    for res in results:
+        status_lower = res.status.lower()
+        if status_lower == "moved":
+            status_style = "[green]moved[/green]"
+        elif status_lower == "preview":
+            status_style = "[yellow]preview[/yellow]"
+        elif status_lower == "duplicate_skipped":
+            status_style = "[cyan]duplicate_skipped[/cyan]"
+        elif status_lower == "failed":
+            status_style = "[red]failed[/red]"
+        else:
+            status_style = res.status
+
+        table.add_row(
+            res.original_path.name,
+            str(res.details.get("tool_selected", "-")),
+            str(res.details.get("date_value", "-")),
+            str(res.proposed_relative_path),
+            status_style,
+        )
+
+    console.print(table)
+
+    # Print summary counts
+    moved_count = sum(1 for r in results if r.status == "moved")
+    preview_count = sum(1 for r in results if r.status == "preview")
+    skipped_count = sum(1 for r in results if r.status == "duplicate_skipped")
+    failed_count = sum(1 for r in results if r.status == "failed")
+
+    summary_parts = []
+    if moved_count:
+        summary_parts.append(f"{moved_count} moved")
+    if preview_count:
+        summary_parts.append(f"{preview_count} previewed")
+    if skipped_count:
+        summary_parts.append(f"{skipped_count} duplicate skipped")
+    if failed_count:
+        summary_parts.append(f"{failed_count} failed")
+
+    summary_str = ", ".join(summary_parts) if summary_parts else "0 files processed"
+    console.print(f"[bold]Total processed:[/bold] {len(results)} file(s) ({summary_str})")
+
+
+@app.command()
+def history(
+    limit: int = typer.Option(
+        25,
+        "--limit",
+        "-n",
+        help="Maximum number of history records to display.",
+    ),
+    audit_db: Optional[Path] = typer.Option(
+        None,
+        "--audit-db",
+        help="Path to SQLite audit ledger database.",
+    ),
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config-file",
+        help="Path to custom config JSON file.",
+    ),
+    run_id: Optional[str] = typer.Option(
+        None,
+        "--run-id",
+        help="Inspect individual file events for a specific run ID.",
+    ),
+) -> None:
+    """View audit history of past organization runs and file events."""
+    resolved_audit_db = get_audit_db_path(config_file, audit_db)
+    ledger = AuditLedger(resolved_audit_db)
+
+    if run_id:
+        events = ledger.get_events_for_run(run_id)
+        if not events:
+            console.print(f"[yellow]No events found for run ID: {run_id}[/yellow]")
+            return
+
+        table = Table(
+            title=f"File Events for Run {run_id}",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        table.add_column("File", style="white")
+        table.add_column("Destination", style="blue")
+        table.add_column("Tool", style="magenta")
+        table.add_column("Date", style="green")
+        table.add_column("Status", style="bold")
+
+        for event in events:
+            status_lower = event["status"].lower()
+            if status_lower == "moved":
+                status_style = "[green]moved[/green]"
+            elif status_lower == "rolled_back":
+                status_style = "[yellow]rolled_back[/yellow]"
+            elif status_lower == "failed":
+                status_style = "[red]failed[/red]"
+            else:
+                status_style = event["status"]
+
+            table.add_row(
+                Path(event["original_path"]).name,
+                str(event["destination_path"]),
+                str(event.get("laya_tool_selected", "-")),
+                str(event.get("date_value", "-")),
+                status_style,
+            )
+        console.print(table)
+        return
+
+    history_records = ledger.get_history(limit=limit)
+    if not history_records:
+        console.print("[yellow]No run history found in audit ledger.[/yellow]")
+        return
+
+    table = Table(
+        title="Audit Run History",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Run ID", style="cyan", overflow="fold")
+    table.add_column("Started At", style="white", overflow="fold")
+    table.add_column("Mode", style="magenta", no_wrap=True)
+    table.add_column("Source Root", style="dim", overflow="fold")
+    table.add_column("Target Root", style="dim", overflow="fold")
+    table.add_column("Total", justify="right")
+    table.add_column("Success", justify="right", style="green")
+    table.add_column("Failed", justify="right", style="red")
+
+    for run in history_records:
+        table.add_row(
+            str(run["run_id"]),
+            str(run["started_at"]),
+            str(run["mode"]),
+            str(run["source_root"]),
+            str(run["target_root"]),
+            str(run["total_files"]),
+            str(run["successful_files"]),
+            str(run["failed_files"]),
+        )
+
+    console.print(table)
+
+
+@app.command()
+def undo(
+    run_id: Optional[str] = typer.Option(
+        None,
+        "--run-id",
+        help="Specific run identifier to roll back.",
+    ),
+    last: bool = typer.Option(
+        False,
+        "--last",
+        "-l",
+        help="Roll back the most recent completed run.",
+    ),
+    audit_db: Optional[Path] = typer.Option(
+        None,
+        "--audit-db",
+        help="Path to SQLite audit ledger database.",
+    ),
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config-file",
+        help="Path to custom config JSON file.",
+    ),
+) -> None:
+    """Roll back previous file movement operations safely."""
+    resolved_audit_db = get_audit_db_path(config_file, audit_db)
+    if str(resolved_audit_db) != ":memory:" and not resolved_audit_db.is_file():
+        console.print(f"[yellow]Audit ledger database does not exist: {resolved_audit_db}[/yellow]")
+        raise typer.Exit(code=1)
+
+    ledger = AuditLedger(resolved_audit_db)
+
+    try:
+        # If run_id is None, rollback_run defaults to the most recent run with moved files
+        undone = ledger.rollback_run(run_id=run_id)
+        if not undone:
+            console.print("[yellow]No moved files found to roll back.[/yellow]")
+            return
+
+        table = Table(
+            title="Rollback Summary",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        table.add_column("Original Path", style="green", overflow="fold")
+        table.add_column("Restored From", style="blue", overflow="fold")
+        table.add_column("Status", style="bold", no_wrap=True)
+
+        for event in undone:
+            status_style = (
+                "[green]rolled_back[/green]"
+                if event["status"] == "rolled_back"
+                else f"[yellow]{event['status']}[/yellow]"
+            )
+            table.add_row(
+                str(event["original_path"]),
+                str(event["destination_path"]),
+                status_style,
+            )
+
+        console.print(table)
+        console.print(f"[green]Successfully rolled back {len(undone)} file(s).[/green]")
+
+    except RollbackError as exc:
+        console.print(f"[red]Rollback failed: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+
+@app.command()
+def config(
+    action_or_key: Optional[str] = typer.Argument(
+        None,
+        help="Action ('get', 'set') or config key.",
+    ),
+    param1: Optional[str] = typer.Argument(
+        None,
+        help="Key (if action used) or value to set.",
+    ),
+    param2: Optional[str] = typer.Argument(
+        None,
+        help="Value to set (if 'set' action used).",
+    ),
+    get: Optional[str] = typer.Option(
+        None,
+        "--get",
+        "-g",
+        help="Retrieve configuration value for key.",
+    ),
+    set: Optional[tuple[str, str]] = typer.Option(
+        None,
+        "--set",
+        "-s",
+        help="Set key and value (e.g. --set dest /path).",
+    ),
+    show: bool = typer.Option(
+        False,
+        "--show",
+        help="Display all configuration settings.",
+    ),
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config-file",
+        help="Path to custom config JSON file.",
+    ),
+) -> None:
+    """Manage configuration settings (default source, destination, and audit db)."""
+    # 1. Flag-based --set
+    if set:
+        key, val = set[0], set[1]
+        set_config_value(key, val, config_file)
+        console.print(f"[green]Set '{key}' = '{val}'[/green]")
+        return
+
+    # 2. Flag-based --get
+    if get:
+        val = get_config_value(get, config_path=config_file)
+        if val is None:
+            console.print(f"[yellow]Key '{get}' not configured.[/yellow]")
+        else:
+            console.print(str(val))
+        return
+
+    # 3. Positional subcommand parsing
+    if action_or_key:
+        if action_or_key.lower() == "set":
+            if not param1 or not param2:
+                console.print("[red]Usage: auto-file config set <key> <value>[/red]")
+                raise typer.Exit(code=1)
+            set_config_value(param1, param2, config_file)
+            console.print(f"[green]Set '{param1}' = '{param2}'[/green]")
+            return
+
+        if action_or_key.lower() == "get":
+            if not param1:
+                console.print("[red]Usage: auto-file config get <key>[/red]")
+                raise typer.Exit(code=1)
+            val = get_config_value(param1, config_path=config_file)
+            if val is None:
+                console.print(f"[yellow]Key '{param1}' not configured.[/yellow]")
+            else:
+                console.print(str(val))
+            return
+
+        # Syntax: config <key> <value> -> set
+        if param1 is not None:
+            set_config_value(action_or_key, param1, config_file)
+            console.print(f"[green]Set '{action_or_key}' = '{param1}'[/green]")
+            return
+
+        # Syntax: config <key> -> get
+        val = get_config_value(action_or_key, config_path=config_file)
+        if val is None:
+            console.print(f"[yellow]Key '{action_or_key}' not configured.[/yellow]")
+        else:
+            console.print(str(val))
+        return
+
+    # 4. Default: show all configuration settings
+    current_config = load_config(config_file)
+    table = Table(
+        title="Auto-File Configuration",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Setting", style="cyan")
+    table.add_column("Value", style="green")
+
+    if not current_config:
+        table.add_row("(none)", "(no settings configured)")
+    else:
+        for k, v in sorted(current_config.items()):
+            table.add_row(str(k), str(v))
+
+    console.print(table)
+    active_audit = get_audit_db_path(config_file)
+    console.print(f"[dim]Effective Audit DB: {active_audit}[/dim]")
