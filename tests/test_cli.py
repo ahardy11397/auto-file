@@ -1,6 +1,7 @@
 """Tests for the Auto-File CLI interface."""
 
 from pathlib import Path
+from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
@@ -337,4 +338,42 @@ def test_cli_history_with_run_id(tmp_path: Path):
     assert "File Events for Run" in hist_res.output
     assert "lease.txt" in hist_res.output
     assert "moved" in hist_res.output
+
+
+def test_cli_undo_both_run_id_and_last_guidance(tmp_path: Path):
+    """Verify undo command rejects passing both --run-id and --last with clear guidance."""
+    audit_db = tmp_path / "audit.db"
+    result = runner.invoke(
+        app,
+        ["undo", "--run-id", "run-12345", "--last", "--audit-db", str(audit_db)],
+    )
+    assert result.exit_code == 1
+    assert "Cannot specify both --run-id and --last" in result.output
+
+
+def test_cli_sort_failure_displays_dash_in_table(tmp_path: Path):
+    """Verify sort table displays '-' instead of '.' for proposed destination on failure."""
+    f = tmp_path / "corrupt.txt"
+    f.write_text("content", encoding="utf-8")
+    dest_dir = tmp_path / "sorted"
+
+    from auto_file.core.executor import PipelineResult
+
+    failed_result = PipelineResult(
+        status="failed",
+        original_path=f,
+        destination_path=f,
+        proposed_relative_path=Path(""),
+        details={"tool_selected": "text_extractor", "date_value": "2026-01-01"},
+        error_message="Simulated failure",
+    )
+
+    with patch("auto_file.core.executor.FilePipelineExecutor.process_file", return_value=failed_result):
+        res = runner.invoke(app, ["sort", str(f), "--dest", str(dest_dir)])
+
+    assert res.exit_code == 0
+    assert "-" in res.output
+    # Ensure '.' is not printed as the destination column in the table row
+    # In table format: corrupt.txt | text_extractor | 2026-01-01 | - | failed
+    assert "failed" in res.output
 

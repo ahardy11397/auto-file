@@ -296,11 +296,11 @@ def _clean_json_string(raw: str) -> str:
     fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned)
     if fence_match:
         cleaned = fence_match.group(1).strip()
-    else:
-        # Search for outermost JSON object brackets
-        bracket_match = re.search(r"(\{[\s\S]*\})", cleaned)
-        if bracket_match:
-            cleaned = bracket_match.group(1).strip()
+
+    # Search for outermost JSON object brackets (handles text/comments before/after '{')
+    bracket_match = re.search(r"(\{[\s\S]*\})", cleaned)
+    if bracket_match:
+        cleaned = bracket_match.group(1).strip()
 
     # Remove trailing commas before closing braces or brackets: , } -> }
     cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
@@ -427,6 +427,8 @@ def _load_transformer_model(
     """Load Hugging Face transformers model and processor with 4-bit quantization.
 
     Falls back to CPU loading if CUDA is unavailable or out-of-memory.
+    Passes local_files_only=True to prevent remote network attempts, with
+    graceful fallback if offline or local files are missing.
     """
     import torch
     from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
@@ -438,28 +440,39 @@ def _load_transformer_model(
         bnb_4bit_use_double_quant=True,
     )
 
+    def _from_pretrained(loader_cls: Any, **kwargs: Any) -> Any:
+        try:
+            return loader_cls.from_pretrained(model_id, local_files_only=True, **kwargs)
+        except (OSError, ValueError) as exc:
+            logger.debug(
+                "Loading %s with local_files_only=True failed (%s); attempting standard load",
+                loader_cls,
+                exc,
+            )
+            return loader_cls.from_pretrained(model_id, **kwargs)
+
     if torch.cuda.is_available() and device != "cpu":
         try:
-            processor = AutoProcessor.from_pretrained(model_id)
-            model = AutoModelForVision2Seq.from_pretrained(
-                model_id,
+            processor = _from_pretrained(AutoProcessor)
+            model = _from_pretrained(
+                AutoModelForVision2Seq,
                 quantization_config=bnb_config,
                 device_map=device,
             )
             return model, processor
         except (torch.cuda.OutOfMemoryError, RuntimeError, Exception) as exc:
             logger.warning("CUDA initialization failed or OOM (%s); falling back to CPU", exc)
-            processor = AutoProcessor.from_pretrained(model_id)
-            model = AutoModelForVision2Seq.from_pretrained(
-                model_id,
+            processor = _from_pretrained(AutoProcessor)
+            model = _from_pretrained(
+                AutoModelForVision2Seq,
                 device_map="cpu",
                 torch_dtype=torch.float32,
             )
             return model, processor
     else:
-        processor = AutoProcessor.from_pretrained(model_id)
-        model = AutoModelForVision2Seq.from_pretrained(
-            model_id,
+        processor = _from_pretrained(AutoProcessor)
+        model = _from_pretrained(
+            AutoModelForVision2Seq,
             device_map="cpu",
             torch_dtype=torch.float32,
         )

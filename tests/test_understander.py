@@ -422,3 +422,62 @@ def test_understander_neural_inference_exception_fallback():
     # Fallback deterministic extracted results
     assert result.content_date == "2026-01-31"
     assert result.category_hint == "Bank Statement"
+
+
+def test_parse_llm_json_response_with_comments_before_brace_in_code_fence():
+    """Verify JSON parsing succeeds when code fence contains introductory comments before '{'."""
+    raw = """```json
+    // Here is the analysis of the document:
+    {
+        "content_date": "2026-07-04",
+        "file_description": "city_tax_assessment",
+        "detected_entities": ["City of Portland"],
+        "category_hint": "Tax Document",
+        "summary": "Property tax assessment notice"
+    }
+    ```"""
+    result = parse_llm_json_response(raw)
+    assert result.content_date == "2026-07-04"
+    assert result.file_description == "city_tax_assessment"
+    assert result.detected_entities == ["City of Portland"]
+    assert result.category_hint == "Tax Document"
+    assert result.summary == "Property tax assessment notice"
+
+
+def test_understander_model_loading_passes_local_files_only():
+    """Verify _load_transformer_model passes local_files_only=True to prevent remote network calls."""
+    from auto_file.core.understander import _load_transformer_model
+
+    mock_torch = MagicMock()
+    mock_torch.cuda.is_available.return_value = False
+    mock_auto_proc = MagicMock()
+    mock_auto_model = MagicMock()
+    mock_processor = MagicMock()
+    mock_model = MagicMock()
+    mock_auto_proc.from_pretrained.return_value = mock_processor
+    mock_auto_model.from_pretrained.return_value = mock_model
+
+    with patch.dict(
+        "sys.modules",
+        {
+            "torch": mock_torch,
+            "transformers": MagicMock(
+                AutoProcessor=mock_auto_proc,
+                AutoModelForVision2Seq=mock_auto_model,
+                BitsAndBytesConfig=MagicMock(),
+            ),
+        },
+    ):
+        model, processor = _load_transformer_model("google/gemma-4-E2B-it", device="cpu")
+        assert model is mock_model
+        assert processor is mock_processor
+        mock_auto_proc.from_pretrained.assert_called_with(
+            "google/gemma-4-E2B-it",
+            local_files_only=True,
+        )
+        mock_auto_model.from_pretrained.assert_called_with(
+            "google/gemma-4-E2B-it",
+            local_files_only=True,
+            device_map="cpu",
+            torch_dtype=mock_torch.float32,
+        )

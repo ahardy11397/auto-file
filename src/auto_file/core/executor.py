@@ -118,6 +118,8 @@ class FilePipelineExecutor:
             PipelineResult indicating outcome and metadata.
         """
         orig_path = Path(file_path)
+        file_moved = False
+        resolved: Any = None
 
         try:
             if not orig_path.exists():
@@ -240,6 +242,7 @@ class FilePipelineExecutor:
             # Case 3: Live move - create parents, atomic move, verify, and record audit event
             resolved.target_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(orig_path), str(resolved.target_path))
+            file_moved = True
 
             # Verification: target exists and SHA-256 matches
             if not resolved.target_path.is_file():
@@ -297,6 +300,11 @@ class FilePipelineExecutor:
                 raise
 
             logger.error("Pipeline execution failed for %s: %s", orig_path, exc)
+            dest_for_failure = (
+                resolved.target_path
+                if (file_moved and resolved is not None and getattr(resolved, "target_path", None) is not None)
+                else orig_path
+            )
             if not dry_run and self.audit_ledger is not None:
                 try:
                     active_run_id = run_id
@@ -312,7 +320,7 @@ class FilePipelineExecutor:
                     self.audit_ledger.record_event(
                         run_id=active_run_id,
                         original_path=orig_path,
-                        destination_path=orig_path,
+                        destination_path=dest_for_failure,
                         sha256="",
                         file_size=0,
                         date_source="error",
@@ -331,7 +339,7 @@ class FilePipelineExecutor:
             return PipelineResult(
                 status="failed",
                 original_path=orig_path,
-                destination_path=orig_path,
+                destination_path=dest_for_failure,
                 proposed_relative_path=Path(""),
                 details={"error": str(exc)},
                 error_message=str(exc),

@@ -364,3 +364,53 @@ def test_router_onnx_inference():
             model_path="mock_router.onnx",
         )
         assert sub == Path("Financial/Bank Statements/Chase_Bank")
+
+
+class _MockNdarray:
+    """Mock object mimicking numpy ndarray with tolist() method."""
+
+    def __init__(self, data):
+        self._data = data
+
+    def tolist(self):
+        return self._data
+
+
+def test_dispatcher_onnx_ndarray_support():
+    """Verify dispatcher properly normalizes numpy ndarrays with tolist()."""
+    dispatcher = LayaDispatcher()
+    meta = _make_metadata(path="scan.bin", mime_type="application/octet-stream", extension=".bin")
+
+    mock_session = MagicMock()
+    # Candidate tools: ["pdf_extractor", "image_extractor", "text_extractor", "audio_extractor", "fallback_extractor"]
+    # Set index 0 ("pdf_extractor") highest
+    mock_session.run.return_value = [_MockNdarray([[0.95, 0.01, 0.01, 0.01, 0.02]])]
+    mock_input = MagicMock()
+    mock_input.name = "input_text"
+    mock_session.get_inputs.return_value = [mock_input]
+
+    with patch("auto_file.core.dispatcher._create_onnx_session", return_value=mock_session):
+        tool = dispatcher.dispatch_tool(meta, model_path="mock_dispatcher.onnx")
+        assert tool == "pdf_extractor"
+
+
+def test_router_onnx_ndarray_support():
+    """Verify router properly normalizes numpy ndarrays with tolist()."""
+    router = TaxonomyRouter()
+
+    mock_session = MagicMock()
+    # Root categories: ["People", "Financial", "Legal", "Property", "Manuals", "Misc"]
+    # Set index 2 ("Legal") highest
+    mock_session.run.return_value = [_MockNdarray([[0.0, 0.0, 1.0, 0.0, 0.0, 0.0]])]
+    mock_input = MagicMock()
+    mock_input.name = "input_text"
+    mock_session.get_inputs.return_value = [mock_input]
+
+    with patch("auto_file.core.router._create_onnx_session", return_value=mock_session):
+        sub = router.resolve_destination(
+            entities=[],
+            category_hint="Legal Notice",
+            summary="Subpoena legal notice",
+            model_path="mock_router.onnx",
+        )
+        assert sub == Path("Legal/Court")

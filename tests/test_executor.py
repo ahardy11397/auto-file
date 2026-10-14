@@ -2,6 +2,7 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 import pytest
 
 from auto_file.core.executor import FilePipelineExecutor, PipelineResult
@@ -417,3 +418,41 @@ def test_pipeline_result_dataclass_coercion():
     assert isinstance(res.original_path, Path)
     assert isinstance(res.destination_path, Path)
     assert isinstance(res.proposed_relative_path, Path)
+
+
+def test_pipeline_post_move_verification_failure_records_target_path(tmp_path: Path):
+    """Verify that if move executes but verification fails, destination_path is recorded for rollback."""
+    source_dir = tmp_path / "inbox"
+    source_dir.mkdir()
+    target_dir = tmp_path / "sorted"
+    target_dir.mkdir()
+    audit_db = tmp_path / "audit.db"
+
+    test_file = source_dir / "statement.txt"
+    test_file.write_text("Chase bank statement for Alpha 2026-01-15", encoding="utf-8")
+    real_sha = compute_file_sha256(test_file)
+
+    ledger = AuditLedger(audit_db)
+    executor = FilePipelineExecutor(target_root=target_dir, audit_ledger=ledger)
+
+    with patch(
+        "auto_file.core.executor.compute_file_sha256",
+        return_value="mismatched_sha256_hash_value",
+    ):
+        res = executor.process_file(test_file, raise_on_error=False)
+
+    assert res.status == "failed"
+    # Source was moved, so destination_path must point to target path where file actually is!
+    assert not test_file.exists()
+    assert res.destination_path.exists()
+    assert res.destination_path != test_file
+    assert "mismatch" in (res.error_message or "").lower()
+
+    # Verify audit event recorded destination_path as resolved.target_path
+    history = ledger.get_history()
+    assert len(history) == 1
+    events = ledger.get_events_for_run(history[0]["run_id"])
+    assert len(events) == 1
+    assert events[0]["status"] == "failed"
+    assert events[0]["destination_path"] == str(res.destination_path)
+    assert events[0]["original_path"] == str(test_file)

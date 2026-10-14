@@ -184,6 +184,9 @@ class LayaDispatcher:
                 return None
 
             raw_out = outputs[0]
+            if hasattr(raw_out, "tolist"):
+                raw_out = raw_out.tolist()
+
             # Handle sequence of logits or scores
             if isinstance(raw_out, (list, tuple)) and len(raw_out) > 0:
                 first_item = raw_out[0]

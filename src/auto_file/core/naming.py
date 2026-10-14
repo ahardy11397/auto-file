@@ -68,8 +68,8 @@ def sanitize_slug(raw_description: str) -> str:
     # Trim leading and trailing underscores
     text = text.strip("_")
 
-    # Truncate to max 64 characters
-    return text[:64]
+    # Truncate to max 64 characters and strip trailing underscores from truncation
+    return text[:64].rstrip("_")
 
 
 def resolve_target_filename(
@@ -118,7 +118,7 @@ def resolve_target_filename(
     if date_str and slug:
         stem = f"{date_str}_{slug}"
     elif date_str:
-        stem = date_str
+        stem = f"{date_str}_document"
     elif slug:
         stem = slug
     else:

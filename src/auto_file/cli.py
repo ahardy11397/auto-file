@@ -150,11 +150,13 @@ def sort(
         else:
             status_style = res.status
 
+        proposed_dest = "-" if res.status == "failed" else str(res.proposed_relative_path)
+
         table.add_row(
             res.original_path.name,
             str(res.details.get("tool_selected", "-")),
             str(res.details.get("date_value", "-")),
-            str(res.proposed_relative_path),
+            proposed_dest,
             status_style,
         )
 
@@ -305,6 +307,12 @@ def undo(
     ),
 ) -> None:
     """Roll back previous file movement operations safely."""
+    if run_id and last:
+        console.print(
+            "[yellow]Cannot specify both --run-id and --last. Please specify either a specific --run-id or use --last for the most recent run.[/yellow]"
+        )
+        raise typer.Exit(code=1)
+
     resolved_audit_db = get_audit_db_path(config_file, audit_db)
     if str(resolved_audit_db) != ":memory:" and not resolved_audit_db.is_file():
         console.print(f"[yellow]Audit ledger database does not exist: {resolved_audit_db}[/yellow]")

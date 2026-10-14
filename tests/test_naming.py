@@ -191,3 +191,37 @@ def test_compute_file_sha256(tmp_path: Path):
     expected_sha = hashlib.sha256(content).hexdigest()
 
     assert compute_file_sha256(test_file) == expected_sha
+
+
+def test_sanitize_slug_trailing_underscore_truncation():
+    """Verify trailing underscores from 64-char truncation are stripped."""
+    # 63 'a's, followed by a space (which becomes '_') at index 63, and then more text
+    raw = ("a" * 63) + " " + "more_text_here"
+    slug = sanitize_slug(raw)
+    assert len(slug) == 63
+    assert not slug.endswith("_")
+    assert slug == "a" * 63
+
+
+def test_resolve_empty_slug_with_date_defaults_to_document(tmp_path: Path):
+    """Verify resolve_target_filename creates YYYY-MM-DD_document.ext when slug is empty."""
+    dest_dir = tmp_path / "Docs"
+    dest_dir.mkdir()
+
+    resolved = resolve_target_filename(
+        date_str="2026-03-15",
+        description="",
+        extension=".pdf",
+        destination_dir=dest_dir,
+    )
+    assert resolved.target_path.name == "2026-03-15_document.pdf"
+    assert not resolved.is_duplicate
+
+    # Also test whitespace-only / punctuation-only description
+    resolved2 = resolve_target_filename(
+        date_str="2026-03-15",
+        description="   ---   ",
+        extension=".txt",
+        destination_dir=dest_dir,
+    )
+    assert resolved2.target_path.name == "2026-03-15_document.txt"
