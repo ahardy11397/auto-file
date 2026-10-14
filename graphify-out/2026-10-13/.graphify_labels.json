@@ -1,0 +1,21 @@
+{
+  "0": "AuditLedger",
+  "1": "ExtractedContent",
+  "2": "detect_file_metadata",
+  "3": "resolve_target_filename",
+  "4": "TaxonomyRouter",
+  "5": "LayaDispatcher",
+  "6": "Six-Stage Processing Pipeline",
+  "7": "auto_file/__init__.py",
+  "8": "CLI Interface (typer/rich)",
+  "9": "understander.py",
+  "10": "auto_file",
+  "11": "tests/__init__.py",
+  "12": "auto-file",
+  "13": "FilePipelineExecutor",
+  "14": "GemmaUnderstander",
+  "15": "test_understander.py",
+  "16": "_load_transformer_model",
+  "17": "UnderstandingResult",
+  "18": ".generate_prompt"
+}
