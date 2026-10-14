@@ -12,6 +12,7 @@ from auto_file.core.understander import (
     parse_llm_json_response,
     understand_content,
 )
+from auto_file.core.watcher import FolderWatcher
 
 __all__ = [
     "FileMetadata",
@@ -31,5 +32,6 @@ __all__ = [
     "normalize_date_string",
     "parse_llm_json_response",
     "understand_content",
+    "FolderWatcher",
 ]
 

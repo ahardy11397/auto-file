@@ -18,6 +18,7 @@ def test_cli_help():
     assert "history" in result.output
     assert "undo" in result.output
     assert "config" in result.output
+    assert "watch" in result.output
     assert "Auto-File System" in result.output
 
 

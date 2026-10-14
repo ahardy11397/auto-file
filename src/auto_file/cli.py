@@ -7,6 +7,8 @@ rolling back operations, and configuring default preferences.
 from __future__ import annotations
 
 from pathlib import Path
+import signal
+import time
 from typing import Optional
 
 from rich.console import Console
@@ -23,6 +25,7 @@ from auto_file.config import (
     set_config_value,
 )
 from auto_file.core.executor import FilePipelineExecutor, PipelineResult
+from auto_file.core.watcher import FolderWatcher
 from auto_file.storage.audit import (
     AuditLedger,
     RollbackError,
@@ -453,3 +456,111 @@ def config(
     console.print(table)
     active_audit = get_audit_db_path(config_file)
     console.print(f"[dim]Effective Audit DB: {active_audit}[/dim]")
+
+
+@app.command()
+def watch(
+    inbox_dir: Path = typer.Argument(
+        ...,
+        help="Path to inbox directory to monitor for new incoming files.",
+        exists=False,
+    ),
+    dest: Optional[Path] = typer.Option(
+        None,
+        "--dest",
+        "-d",
+        help="Destination root directory for organized files.",
+    ),
+    debounce: float = typer.Option(
+        2.0,
+        "--debounce",
+        help="Debounce interval in seconds before processing a detected file.",
+    ),
+    recursive: bool = typer.Option(
+        False,
+        "--recursive",
+        "-r",
+        help="Recursively monitor subdirectories inside inbox.",
+    ),
+    audit_db: Optional[Path] = typer.Option(
+        None,
+        "--audit-db",
+        help="Path to SQLite audit ledger database.",
+    ),
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config-file",
+        help="Path to custom config JSON file.",
+    ),
+) -> None:
+    """Watch an inbox directory continuously and organize incoming files automatically."""
+    if not inbox_dir.exists():
+        console.print(f"[red]Error: Inbox directory does not exist: {inbox_dir}[/red]")
+        raise typer.Exit(code=1)
+
+    if not inbox_dir.is_dir():
+        console.print(f"[red]Error: Inbox path is not a directory: {inbox_dir}[/red]")
+        raise typer.Exit(code=1)
+
+    target_dest = dest or get_default_dest(config_file)
+    if target_dest is None:
+        console.print(
+            "[red]Error: Destination directory not specified. "
+            "Provide --dest or set default with 'auto-file config --set dest <path>'[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    resolved_audit_db = get_audit_db_path(config_file, audit_db)
+    ledger = AuditLedger(resolved_audit_db)
+    executor = FilePipelineExecutor(
+        target_root=target_dest,
+        audit_ledger=ledger,
+    )
+
+    def _on_file_processed(res: PipelineResult) -> None:
+        status_lower = res.status.lower()
+        if status_lower == "moved":
+            status_style = "[green]moved[/green]"
+        elif status_lower == "duplicate_skipped":
+            status_style = "[cyan]duplicate_skipped[/cyan]"
+        elif status_lower == "failed":
+            status_style = "[red]failed[/red]"
+        else:
+            status_style = res.status
+
+        console.print(
+            f"[bold cyan]Auto-Organized:[/bold cyan] {res.original_path.name} -> "
+            f"[blue]{res.proposed_relative_path}[/blue] ({status_style})"
+        )
+
+    watcher = FolderWatcher(
+        inbox_dir=inbox_dir,
+        executor=executor,
+        debounce_seconds=debounce,
+        recursive=recursive,
+        on_processed=_on_file_processed,
+    )
+
+    console.print(
+        f"[bold green]Watching directory:[/bold green] {inbox_dir.resolve()}\n"
+        f"[bold blue]Organizing into:[/bold blue] {target_dest.resolve()}\n"
+        f"[dim]Debounce: {debounce}s | Recursive: {recursive} | Press Ctrl+C to stop[/dim]"
+    )
+
+    try:
+        def _handle_sigterm(signum: int, frame: object) -> None:
+            raise KeyboardInterrupt()
+
+        signal.signal(signal.SIGTERM, _handle_sigterm)
+    except (ValueError, AttributeError):
+        pass
+
+    watcher.start()
+    try:
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Stopping watcher daemon...[/yellow]")
+    finally:
+        watcher.stop()
+        console.print("[green]Watcher stopped cleanly.[/green]")
