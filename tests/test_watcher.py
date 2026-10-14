@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from typer.testing import CliRunner
@@ -315,3 +315,47 @@ def test_cli_watch_clean_interrupt(tmp_path: Path):
     assert "Watching directory" in result.output
     assert "Stopping watcher daemon" in result.output
     assert "Watcher stopped cleanly" in result.output
+
+
+def test_watcher_boundary_checks_and_nested_target_root(tmp_path: Path):
+    """Verify watcher ignores files outside inbox and ignores files inside nested target_root."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    # Nested target_root inside inbox
+    sorted_dir = inbox / "sorted"
+    sorted_dir.mkdir()
+
+    ledger = AuditLedger(tmp_path / "audit.db")
+    executor = FilePipelineExecutor(target_root=sorted_dir, audit_ledger=ledger)
+    watcher = FolderWatcher(inbox_dir=inbox, executor=executor, debounce_seconds=0.3, recursive=True)
+
+    # 1. Test boundary rejection of paths outside inbox
+    outside_file = tmp_path / "outside.txt"
+    outside_file.write_text("Outside file", encoding="utf-8")
+    watcher._queue_file(outside_file)
+    assert outside_file.resolve() not in watcher._pending
+
+    # 2. Test loop prevention: files created directly in nested target_root are ignored
+    inside_target_file = sorted_dir / "already_sorted.txt"
+    inside_target_file.write_text("Already sorted document", encoding="utf-8")
+    watcher._queue_file(inside_target_file)
+    assert inside_target_file.resolve() not in watcher._pending
+    assert watcher.is_ignored(inside_target_file)
+
+    # 3. Live watcher verification: incoming files in inbox are organized into nested sorted_dir
+    # without causing an infinite recursive re-sorting loop
+    watcher.start()
+    try:
+        incoming = inbox / "medical_report.txt"
+        incoming.write_text("Alpha medical appointment doctor dental checkup", encoding="utf-8")
+        time.sleep(1.2)
+
+        # Incoming file should be moved
+        assert not incoming.exists()
+        # Pre-existing file inside nested target_root should remain untouched
+        assert inside_target_file.exists()
+        # Destination folder should contain the organized file
+        sorted_files = list(sorted_dir.rglob("*.txt"))
+        assert len(sorted_files) >= 2
+    finally:
+        watcher.stop()

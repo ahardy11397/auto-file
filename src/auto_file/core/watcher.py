@@ -118,6 +118,15 @@ class FolderWatcher:
             if any(part.startswith(".") for part in path.parts):
                 return True
 
+        # 3. Inside executor target_root (prevent loop when target_root is inside inbox_dir)
+        if hasattr(self.executor, "target_root"):
+            try:
+                target_root_resolved = Path(self.executor.target_root).resolve()
+                if path.is_relative_to(target_root_resolved):
+                    return True
+            except (OSError, ValueError):
+                pass
+
         return False
 
     def _queue_file(self, path: Path) -> None:
@@ -126,6 +135,19 @@ class FolderWatcher:
             resolved_path = path.resolve()
         except OSError:
             return
+
+        # Boundary check: ensure path is inside inbox_dir
+        if not resolved_path.is_relative_to(self.inbox_dir):
+            return
+
+        # If target_root is inside inbox_dir, ignore files inside it
+        if hasattr(self.executor, "target_root"):
+            try:
+                target_root_resolved = Path(self.executor.target_root).resolve()
+                if resolved_path.is_relative_to(target_root_resolved):
+                    return
+            except (OSError, ValueError):
+                pass
 
         if self.is_ignored(resolved_path):
             return
@@ -192,7 +214,7 @@ class FolderWatcher:
                     try:
                         with open(path, "rb") as f:
                             f.read(1024)
-                    except (OSError, PermissionError):
+                    except OSError:
                         # Writer may hold exclusive lock (e.g., ongoing copy/download)
                         self._pending[path] = (now + min(self.debounce_seconds, 0.5), current_size)
                         continue
