@@ -60,9 +60,9 @@ def main(
 
 @app.command()
 def sort(
-    path: Path = typer.Argument(
-        ...,
-        help="Path to source file or directory to organize.",
+    path: Optional[Path] = typer.Argument(
+        None,
+        help="Path to source file or directory to organize (defaults to configured inbox).",
         exists=False,
     ),
     dest: Optional[Path] = typer.Option(
@@ -94,8 +94,16 @@ def sort(
     ),
 ) -> None:
     """Sort and organize a single file or an entire directory."""
-    if not path.exists():
-        console.print(f"[red]Error: Source path does not exist: {path}[/red]")
+    source_path = path or get_default_source(config_file)
+    if source_path is None:
+        console.print(
+            "[red]Error: Source path not specified. "
+            "Provide path or set default with 'auto-file config set inbox <path>'[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    if not source_path.exists():
+        console.print(f"[red]Error: Source path does not exist: {source_path}[/red]")
         raise typer.Exit(code=1)
 
     target_dest = dest or get_default_dest(config_file)
@@ -114,16 +122,16 @@ def sort(
     )
 
     results: list[PipelineResult] = []
-    if path.is_file():
-        results = [executor.process_file(path, dry_run=dry_run)]
-    elif path.is_dir():
+    if source_path.is_file():
+        results = [executor.process_file(source_path, dry_run=dry_run)]
+    elif source_path.is_dir():
         results = executor.process_directory(
-            path,
+            source_path,
             dry_run=dry_run,
             recursive=recursive,
         )
     else:
-        console.print(f"[red]Error: Unsupported file path type: {path}[/red]")
+        console.print(f"[red]Error: Unsupported file path type: {source_path}[/red]")
         raise typer.Exit(code=1)
 
     table = Table(
@@ -468,9 +476,9 @@ def config(
 
 @app.command()
 def watch(
-    inbox_dir: Path = typer.Argument(
-        ...,
-        help="Path to inbox directory to monitor for new incoming files.",
+    inbox_dir: Optional[Path] = typer.Argument(
+        None,
+        help="Path to inbox directory to monitor for new incoming files (defaults to configured inbox).",
         exists=False,
     ),
     dest: Optional[Path] = typer.Option(
@@ -502,12 +510,20 @@ def watch(
     ),
 ) -> None:
     """Watch an inbox directory continuously and organize incoming files automatically."""
-    if not inbox_dir.exists():
-        console.print(f"[red]Error: Inbox directory does not exist: {inbox_dir}[/red]")
+    resolved_inbox = inbox_dir or get_default_source(config_file)
+    if resolved_inbox is None:
+        console.print(
+            "[red]Error: Inbox directory not specified. "
+            "Provide directory argument or set default with 'auto-file config set inbox <path>'[/red]"
+        )
         raise typer.Exit(code=1)
 
-    if not inbox_dir.is_dir():
-        console.print(f"[red]Error: Inbox path is not a directory: {inbox_dir}[/red]")
+    if not resolved_inbox.exists():
+        console.print(f"[red]Error: Inbox directory does not exist: {resolved_inbox}[/red]")
+        raise typer.Exit(code=1)
+
+    if not resolved_inbox.is_dir():
+        console.print(f"[red]Error: Inbox path is not a directory: {resolved_inbox}[/red]")
         raise typer.Exit(code=1)
 
     target_dest = dest or get_default_dest(config_file)
@@ -542,7 +558,7 @@ def watch(
         )
 
     watcher = FolderWatcher(
-        inbox_dir=inbox_dir,
+        inbox_dir=resolved_inbox,
         executor=executor,
         debounce_seconds=debounce,
         recursive=recursive,
@@ -550,7 +566,7 @@ def watch(
     )
 
     console.print(
-        f"[bold green]Watching directory:[/bold green] {inbox_dir.resolve()}\n"
+        f"[bold green]Watching directory:[/bold green] {resolved_inbox.resolve()}\n"
         f"[bold blue]Organizing into:[/bold blue] {target_dest.resolve()}\n"
         f"[dim]Debounce: {debounce}s | Recursive: {recursive} | Press Ctrl+C to stop[/dim]"
     )
