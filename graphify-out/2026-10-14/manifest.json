@@ -66,10 +66,10 @@
     "semantic_hash": "d197eb5e0d4c3690e51e77e384fafcb7"
   },
   "src/auto_file/core/naming.py": {
-    "mtime": 1791829390.628606,
-    "seen": 1791842381.2752657,
-    "ast_hash": "b68a378e0100ac96e2288c8d68603dcb",
-    "semantic_hash": "b68a378e0100ac96e2288c8d68603dcb"
+    "mtime": 1792006190.1015365,
+    "seen": 1792006568.4255466,
+    "ast_hash": "2f90e5ffbea4c011f9d68988a13f6626",
+    "semantic_hash": ""
   },
   "src/auto_file/storage/__init__.py": {
     "mtime": 1791833114.9061189,
@@ -108,16 +108,16 @@
     "semantic_hash": "6d48359a3cdfa6cc757a98ffe6741b21"
   },
   "tests/test_naming.py": {
-    "mtime": 1791829336.9849958,
-    "seen": 1791854527.4818175,
-    "ast_hash": "f03feb7566aa99f4faf478018158b40d",
-    "semantic_hash": "f03feb7566aa99f4faf478018158b40d"
+    "mtime": 1792006380.33717,
+    "seen": 1792006568.425567,
+    "ast_hash": "aa6bbe0904ccb52fb8010cba6d94e97a",
+    "semantic_hash": ""
   },
   "tests/test_router.py": {
-    "mtime": 1791834125.472592,
-    "seen": 1791842381.2752836,
-    "ast_hash": "d1dd838edab3a35eddc40642d84caa9a",
-    "semantic_hash": "d1dd838edab3a35eddc40642d84caa9a"
+    "mtime": 1792006437.6143582,
+    "seen": 1792006568.4255688,
+    "ast_hash": "0a1d06e216ed92c433a5a208c4e2bcd5",
+    "semantic_hash": ""
   },
   "tests/test_sanity.py": {
     "mtime": 1791825965.9924035,
@@ -156,27 +156,27 @@
     "semantic_hash": "8d28c5581d50e1c5ae31efc7c9de2904"
   },
   "src/auto_file/core/dispatcher.py": {
-    "mtime": 1791847123.510733,
-    "seen": 1791854527.4817839,
-    "ast_hash": "bc87b4acec14e5fd71ab830860240074",
+    "mtime": 1792006150.3544023,
+    "seen": 1792006568.425528,
+    "ast_hash": "aef374b76c26f9ae0c6846cf3fb06b21",
     "semantic_hash": ""
   },
   "src/auto_file/core/router.py": {
-    "mtime": 1791847361.1114125,
-    "seen": 1791854527.4818022,
-    "ast_hash": "130a334f133a87e81c79687778b99341",
+    "mtime": 1792006154.995418,
+    "seen": 1792006568.4255488,
+    "ast_hash": "4525f82115f16560aa616fff85811b77",
     "semantic_hash": ""
   },
   "src/auto_file/core/understander.py": {
-    "mtime": 1791854375.852451,
-    "seen": 1791854527.4818041,
-    "ast_hash": "22e91d0f5900ebb3b2fc4e9a0369a4bb",
+    "mtime": 1792006234.622686,
+    "seen": 1792006568.4255502,
+    "ast_hash": "5ad7c22dca0fbc78785224ff64d7f8ec",
     "semantic_hash": ""
   },
   "tests/test_understander.py": {
-    "mtime": 1791854479.6755586,
-    "seen": 1791854527.4818227,
-    "ast_hash": "eb752214a24c18c364d40147542c6096",
+    "mtime": 1792006406.8272572,
+    "seen": 1792006568.4255722,
+    "ast_hash": "9cd72a062beaeeed43b7e471e48ede5f",
     "semantic_hash": ""
   },
   "README.md": {
@@ -186,21 +186,21 @@
     "semantic_hash": ""
   },
   "src/auto_file/core/executor.py": {
-    "mtime": 1791937095.9945745,
-    "seen": 1791937206.5945864,
-    "ast_hash": "5dee1611174ecdcd902501fe448d7678",
+    "mtime": 1792006177.1874928,
+    "seen": 1792006568.4255307,
+    "ast_hash": "24eb4a9e8499c54e3566a2cf362f7a8e",
     "semantic_hash": ""
   },
   "tests/test_executor.py": {
-    "mtime": 1791937071.5866694,
-    "seen": 1791937206.594619,
-    "ast_hash": "44575dae18a779f765d5e6a7c2f3ff39",
+    "mtime": 1792006508.2735896,
+    "seen": 1792006568.425564,
+    "ast_hash": "b15d5fd5ecd5167a25600c9d767314bb",
     "semantic_hash": ""
   },
   "src/auto_file/cli.py": {
-    "mtime": 1791997823.5077035,
-    "seen": 1791998036.1366107,
-    "ast_hash": "c7a2f2ddf892456193846148e8462e89",
+    "mtime": 1792006206.1345904,
+    "seen": 1792006568.4255168,
+    "ast_hash": "3a2136058c3d6a9c8b94b941b5207208",
     "semantic_hash": ""
   },
   "src/auto_file/config.py": {
@@ -210,9 +210,9 @@
     "semantic_hash": ""
   },
   "tests/test_cli.py": {
-    "mtime": 1791997891.4427874,
-    "seen": 1791998036.136655,
-    "ast_hash": "bcd2f12fa5893dbbb4e18b6b244798d3",
+    "mtime": 1792006451.0474024,
+    "seen": 1792006568.4255612,
+    "ast_hash": "33534b3179102dcaa49ca941fe5813dd",
     "semantic_hash": ""
   },
   "src/auto_file/core/watcher.py": {

@@ -1,17 +1,17 @@
 # Graph Report - auto-file  (2026-10-14)
 
 ## Corpus Check
-- 38 files · ~27,306 words
+- 38 files · ~27,383 words
 - Verdict: corpus is large enough that graph structure adds value.
 - Unclassified: 2 file(s) not represented in the graph (top: (none) 1, .lock 1)
 
 ## Summary
-- 642 nodes · 1525 edges · 25 communities (18 shown, 7 thin omitted)
-- Extraction: 79% EXTRACTED · 21% INFERRED · 0% AMBIGUOUS · INFERRED: 315 edges (avg confidence: 0.91)
+- 642 nodes · 1521 edges · 26 communities (19 shown, 7 thin omitted)
+- Extraction: 80% EXTRACTED · 20% INFERRED · 0% AMBIGUOUS · INFERRED: 309 edges (avg confidence: 0.91)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `b064da55`
+- Built from commit: `bfcb5f25`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -39,6 +39,7 @@
 - _create_onnx_session
 - _MockNdarray
 - _get_tag_value
+- auto-file
 
 ## God Nodes (most connected - your core abstractions)
 1. `AuditLedger` - 58 edges
@@ -53,16 +54,16 @@
 10. `LayaDispatcher` - 21 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `Safety & reversibility` --references--> `undo()`  [INFERRED]
-  README.md → src/auto_file/cli.py
-- `Usage` --references--> `sort()`  [INFERRED]
-  README.md → src/auto_file/cli.py
-- `Usage` --references--> `history()`  [INFERRED]
-  README.md → src/auto_file/cli.py
-- `Usage` --references--> `undo()`  [INFERRED]
-  README.md → src/auto_file/cli.py
-- `Usage` --references--> `config()`  [INFERRED]
-  README.md → src/auto_file/cli.py
+- `test_detect_text_file()` --uses--> `FileMetadata`  [INFERRED]
+  tests/test_detector.py → src/auto_file/core/detector.py
+- `_make_metadata()` --uses--> `FileMetadata`  [INFERRED]
+  tests/test_router.py → src/auto_file/core/detector.py
+- `test_cli_sort_failure_displays_dash_in_table()` --uses--> `PipelineResult`  [INFERRED]
+  tests/test_cli.py → src/auto_file/core/executor.py
+- `test_pipeline_dry_run_does_not_move_file()` --uses--> `PipelineResult`  [INFERRED]
+  tests/test_executor.py → src/auto_file/core/executor.py
+- `test_pipeline_live_move()` --uses--> `PipelineResult`  [INFERRED]
+  tests/test_executor.py → src/auto_file/core/executor.py
 
 ## Import Cycles
 - None detected.
@@ -71,7 +72,7 @@
 - **Laya Used Twice: Dispatch + Route** — idea_laya_decision_model, docs_superpowers_specs_2026_10_09_auto_file_system_design_dispatch_stage, docs_superpowers_specs_2026_10_09_auto_file_system_design_route_stage [EXTRACTED 1.00]
 - **Reversibility Guarantee (hash + ledger + undo)** — docs_superpowers_specs_2026_10_09_auto_file_system_design_sqlite_audit_ledger, docs_superpowers_plans_2026_10_12_auto_file_system_rollback_safety, docs_superpowers_specs_2026_10_09_auto_file_system_design_execute_audit_stage [EXTRACTED 1.00]
 
-## Communities (25 total, 7 thin omitted)
+## Communities (26 total, 7 thin omitted)
 
 ### Community 0 - ".rollback_run"
 Cohesion: 0.14
@@ -110,8 +111,8 @@ Cohesion: 0.13
 Nodes (12): _create_onnx_session(), LayaDispatcher, _make_metadata(), test_dispatch_audio_files(), test_dispatch_fallback_extractor(), test_dispatch_images(), test_dispatch_pdf_by_mime_and_extension(), test_dispatch_standalone_function() (+4 more)
 
 ### Community 12 - "cli.py"
-Cohesion: 0.06
-Nodes (23): auto-file, Design docs, Development, How it works, Installation, Naming, Project layout, Safety & reversibility (+15 more)
+Cohesion: 0.08
+Nodes (14): config(), history(), main(), sort(), undo(), watch(), get_audit_db_path(), get_config_value() (+6 more)
 
 ### Community 13 - "FilePipelineExecutor"
 Cohesion: 0.08
@@ -145,16 +146,20 @@ Nodes (5): AuditError, RollbackCollisionError, RollbackError, RollbackMissingFil
 Cohesion: 0.28
 Nodes (3): resolve_destination(), route_destination(), sanitize_folder_name()
 
+### Community 25 - "auto-file"
+Cohesion: 0.20
+Nodes (9): auto-file, CLI Usage, Design docs, Development & Testing, How it works, Installation, Naming, Project layout (+1 more)
+
 ## Knowledge Gaps
 - **6 isolated node(s):** `auto_file`, `Detect Stage`, `Extract Stage (PDF/Image/Text/Audio/Fallback)`, `Graphify Project Rules`, `CLI Interface (typer/rich)` (+1 more)
-  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 282 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
+  These have ≤1 connection - possible missing edges or undocumented components. (Counts symbols only; 284 node(s) total have ≤1 connection when file, concept and rationale nodes are included.)
 - **7 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `AuditLedger` connect `AuditLedger` to `.rollback_run`, `FolderWatcher`, `test_cli.py`, `cli.py`, `FilePipelineExecutor`, `executor.py`, `RollbackError`?**
-  _High betweenness centrality (0.139) - this node is a cross-community bridge._
+  _High betweenness centrality (0.133) - this node is a cross-community bridge._
 - **Are the 41 inferred relationships involving `AuditLedger` (e.g. with `history()` and `sort()`) actually correct?**
   _`AuditLedger` has 41 INFERRED edges - model-reasoned connections that need verification._
 - **What connects `auto_file`, `Detect Stage`, `Extract Stage (PDF/Image/Text/Audio/Fallback)` to the rest of the system?**
@@ -162,7 +167,7 @@ _Questions this graph is uniquely positioned to answer:_
 - **Should `.rollback_run` be split into smaller, more focused modules?**
   _Cohesion score 0.1411764705882353 - nodes in this community are weakly interconnected._
 - **Why does `FilePipelineExecutor` connect `FilePipelineExecutor` to `TaxonomyRouter`, `FolderWatcher`, `LayaDispatcher`, `cli.py`, `GemmaUnderstander`, `executor.py`, `AuditLedger`?**
-  _High betweenness centrality (0.121) - this node is a cross-community bridge._
+  _High betweenness centrality (0.114) - this node is a cross-community bridge._
 - **Are the 33 inferred relationships involving `FilePipelineExecutor` (e.g. with `sort()` and `watch()`) actually correct?**
   _`FilePipelineExecutor` has 33 INFERRED edges - model-reasoned connections that need verification._
 - **Should `ExtractedContent` be split into smaller, more focused modules?**

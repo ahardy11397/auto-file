@@ -23,5 +23,6 @@
   "21": "router.py",
   "22": "_create_onnx_session",
   "23": "_MockNdarray",
-  "24": "_get_tag_value"
+  "24": "_get_tag_value",
+  "25": "auto-file"
 }
