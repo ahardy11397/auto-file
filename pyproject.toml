@@ -17,6 +17,7 @@ dependencies = [
     "pytest",
     "mutagen>=1.48.1",
     "pypdfium2>=5.14.0",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]

@@ -18,6 +18,7 @@ from auto_file.core.dispatcher import LayaDispatcher
 from auto_file.core.extractors import get_extractor_for_tool
 from auto_file.core.naming import compute_file_sha256, resolve_target_filename
 from auto_file.core.router import TaxonomyRouter
+from auto_file.core.taxonomy import load_taxonomy
 from auto_file.core.understander import GemmaUnderstander, normalize_date_string
 
 if TYPE_CHECKING:
@@ -79,6 +80,7 @@ class FilePipelineExecutor:
         router: TaxonomyRouter | None = None,
         laya_model_path: Path | str | None = None,
         exact_spelling: bool = False,
+        structure: Path | str | None = None,
     ) -> None:
         """Initialize the pipeline executor.
 
@@ -90,12 +92,20 @@ class FilePipelineExecutor:
             router: Optional custom taxonomy folder router.
             laya_model_path: Optional path to Laya ONNX decision model weights.
             exact_spelling: If True, uses verbatim spelling from FOLDER_STRUCTURE.md.
+            structure: Optional path to a YAML folder-structure file. When
+                given, routing follows that file instead of the built-in
+                defaults (ignored when a custom router is supplied).
         """
         self.target_root = Path(target_root)
         self.audit_ledger = audit_ledger
         self.dispatcher = dispatcher or LayaDispatcher(model_path=laya_model_path)
         self.understander = understander or GemmaUnderstander()
-        self.router = router or TaxonomyRouter(model_path=laya_model_path, exact_spelling=exact_spelling)
+        if router is not None:
+            self.router = router
+        elif structure is not None:
+            self.router = TaxonomyRouter(taxonomy=load_taxonomy(structure))
+        else:
+            self.router = TaxonomyRouter(model_path=laya_model_path, exact_spelling=exact_spelling)
 
     def process_file(
         self,

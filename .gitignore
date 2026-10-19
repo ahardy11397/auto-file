@@ -6,3 +6,9 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+
+# Personal auto-file configs and data (machine-local, never commit)
+config.json
+folder_structure*.yaml
+*.db
+FOLDER_STRUCTURE.md

@@ -113,6 +113,21 @@ def get_default_source(config_path: Path | str | None = None) -> Path | None:
     return None
 
 
+def get_structure_path(config_path: Path | str | None = None) -> Path | None:
+    """Resolve the folder-structure (taxonomy) YAML file path from config.
+
+    Checks keys 'structure', 'structure_file', and 'folder_structure'.
+    Returns None when no structure file is configured (built-in defaults
+    are used).
+    """
+    config = load_config(config_path)
+    for key in ("structure", "structure_file", "folder_structure"):
+        val = config.get(key)
+        if val:
+            return Path(val)
+    return None
+
+
 def get_audit_db_path(
     config_path: Path | str | None = None,
     explicit_path: Path | str | None = None,

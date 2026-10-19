@@ -21,10 +21,12 @@ from auto_file.config import (
     get_config_value,
     get_default_dest,
     get_default_source,
+    get_structure_path,
     load_config,
     set_config_value,
 )
 from auto_file.core.executor import FilePipelineExecutor, PipelineResult
+from auto_file.core.taxonomy import load_taxonomy, taxonomy_to_yaml
 from auto_file.core.watcher import FolderWatcher
 from auto_file.storage.audit import (
     AuditLedger,
@@ -36,6 +38,21 @@ app = typer.Typer(
     add_completion=False,
 )
 console = Console()
+
+DEFAULT_STRUCTURE_FILE = Path.home() / ".config" / "auto-file" / "folder_structure.yaml"
+
+
+def _resolved_structure(config_file: Path | None) -> Path | None:
+    """Return the configured structure file path, validating it if set."""
+    structure_path = get_structure_path(config_file)
+    if structure_path is None:
+        return None
+    try:
+        load_taxonomy(structure_path)
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]Error: invalid folder structure file: {exc}[/red]")
+        raise typer.Exit(code=1)
+    return structure_path
 
 
 @app.callback(invoke_without_command=True)
@@ -98,7 +115,7 @@ def sort(
     if source_path is None:
         console.print(
             "[red]Error: Source path not specified. "
-            "Provide path or set default with 'auto-file config set inbox <path>'[/red]"
+            "Provide a path or run 'auto-file setup' to configure an inbox.[/red]"
         )
         raise typer.Exit(code=1)
 
@@ -110,7 +127,7 @@ def sort(
     if target_dest is None:
         console.print(
             "[red]Error: Destination directory not specified. "
-            "Provide --dest or set default with 'auto-file config --set dest <path>'[/red]"
+            "Provide --dest or run 'auto-file setup' to configure defaults.[/red]"
         )
         raise typer.Exit(code=1)
 
@@ -119,6 +136,7 @@ def sort(
     executor = FilePipelineExecutor(
         target_root=target_dest,
         audit_ledger=ledger,
+        structure=_resolved_structure(config_file),
     )
 
     results: list[PipelineResult] = []
@@ -514,7 +532,7 @@ def watch(
     if resolved_inbox is None:
         console.print(
             "[red]Error: Inbox directory not specified. "
-            "Provide directory argument or set default with 'auto-file config set inbox <path>'[/red]"
+            "Provide a directory argument or run 'auto-file setup' to configure one.[/red]"
         )
         raise typer.Exit(code=1)
 
@@ -530,15 +548,17 @@ def watch(
     if target_dest is None:
         console.print(
             "[red]Error: Destination directory not specified. "
-            "Provide --dest or set default with 'auto-file config --set dest <path>'[/red]"
+            "Provide --dest or run 'auto-file setup' to configure defaults.[/red]"
         )
         raise typer.Exit(code=1)
 
     resolved_audit_db = get_audit_db_path(config_file, audit_db)
     ledger = AuditLedger(resolved_audit_db)
+    structure_path = _resolved_structure(config_file)
     executor = FilePipelineExecutor(
         target_root=target_dest,
         audit_ledger=ledger,
+        structure=structure_path,
     )
 
     def _on_file_processed(res: PipelineResult) -> None:
@@ -568,7 +588,8 @@ def watch(
     console.print(
         f"[bold green]Watching directory:[/bold green] {resolved_inbox.resolve()}\n"
         f"[bold blue]Organizing into:[/bold blue] {target_dest.resolve()}\n"
-        f"[dim]Debounce: {debounce}s | Recursive: {recursive} | Press Ctrl+C to stop[/dim]"
+        f"[dim]Structure: {structure_path or '(built-in defaults)'}\n"
+        f"Debounce: {debounce}s | Recursive: {recursive} | Press Ctrl+C to stop[/dim]"
     )
 
     try:
@@ -588,3 +609,129 @@ def watch(
     finally:
         watcher.stop()
         console.print("[green]Watcher stopped cleanly.[/green]")
+
+
+@app.command()
+def setup(
+    inbox: Optional[Path] = typer.Option(
+        None,
+        "--inbox",
+        "-i",
+        help="Inbox folder where you drop files to sort (skips the prompt).",
+    ),
+    dest: Optional[Path] = typer.Option(
+        None,
+        "--dest",
+        "-d",
+        help="Destination root folder where organized files are filed (skips the prompt).",
+    ),
+    structure: Optional[Path] = typer.Option(
+        None,
+        "--structure",
+        "-s",
+        help="Path to a YAML folder-structure file defining where files go (skips the prompt).",
+    ),
+    generate_structure: Optional[bool] = typer.Option(
+        None,
+        "--generate-structure/--no-generate-structure",
+        help="Write a starter folder-structure file when it does not exist yet.",
+    ),
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config-file",
+        help="Path to custom config JSON file.",
+    ),
+) -> None:
+    """Configure auto-file: inbox, destination root, and folder structure.
+
+    Run with no options for an interactive walkthrough. Everything can be
+    changed later by re-running setup or with 'auto-file config set'.
+    """
+    console.print("[bold]Auto-File setup[/bold]")
+    console.print(
+        "[dim]Drop files in the inbox; auto-file reads them, renames them, "
+        "and files them under the destination root.[/dim]\n"
+    )
+
+    # 1. Inbox
+    if inbox is None:
+        default_inbox = get_default_source(config_file) or Path.home() / "Inbox"
+        inbox = Path(typer.prompt("Inbox folder (where you drop files to sort)", default=str(default_inbox))).expanduser()
+    if inbox.exists() and not inbox.is_dir():
+        console.print(f"[red]Error: inbox path is not a directory: {inbox}[/red]")
+        raise typer.Exit(code=1)
+    if not inbox.exists():
+        inbox.mkdir(parents=True, exist_ok=True)
+        console.print(f"[green]Created inbox directory:[/green] {inbox}")
+
+    # 2. Destination root
+    if dest is None:
+        default_dest = get_default_dest(config_file) or Path.home() / "SortedFiles"
+        dest = Path(typer.prompt("Destination root (where sorted files are filed)", default=str(default_dest))).expanduser()
+    if dest.exists() and not dest.is_dir():
+        console.print(f"[red]Error: destination path is not a directory: {dest}[/red]")
+        raise typer.Exit(code=1)
+    if not dest.exists():
+        dest.mkdir(parents=True, exist_ok=True)
+        console.print(f"[green]Created destination directory:[/green] {dest}")
+
+    # 3. Folder structure file
+    if structure is None:
+        configured = get_structure_path(config_file)
+        structure = Path(
+            typer.prompt(
+                "Folder structure file (defines where files go)",
+                default=str(configured or DEFAULT_STRUCTURE_FILE),
+            )
+        ).expanduser()
+
+    structure_generated = False
+    if structure.exists():
+        try:
+            load_taxonomy(structure)
+        except (FileNotFoundError, ValueError) as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+            raise typer.Exit(code=1)
+        console.print(f"[green]Using existing folder structure:[/green] {structure}")
+    else:
+        should_generate = generate_structure
+        if should_generate is None:
+            should_generate = typer.confirm(
+                f"Folder structure file does not exist: {structure}\nGenerate a starter one you can edit?",
+                default=True,
+            )
+        if should_generate:
+            structure.parent.mkdir(parents=True, exist_ok=True)
+            structure.write_text(taxonomy_to_yaml(), encoding="utf-8")
+            structure_generated = True
+            console.print(f"[green]Wrote starter folder structure:[/green] {structure}")
+        else:
+            console.print(
+                "[yellow]No structure file written; built-in defaults will be used until it exists.[/yellow]"
+            )
+
+    # 4. Persist configuration
+    set_config_value("inbox", str(inbox), config_file)
+    set_config_value("dest", str(dest), config_file)
+    set_config_value("structure", str(structure), config_file)
+
+    table = Table(
+        title="Setup complete",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Setting", style="cyan")
+    table.add_column("Value", style="green")
+    table.add_row("inbox", str(inbox))
+    table.add_row("dest", str(dest))
+    table.add_row("structure", str(structure))
+    console.print(table)
+
+    console.print(
+        "\n[bold]Next steps[/bold]\n"
+        "  1. Preview a sort:        auto-file sort --dry-run\n"
+        "  2. Sort everything now:   auto-file sort\n"
+        "  3. Watch the inbox:       auto-file watch\n"
+        f"\nEdit the folder structure any time (takes effect on the next run): {structure}"
+        + ("  [dim](just generated)[/dim]" if structure_generated else "")
+    )

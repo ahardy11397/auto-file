@@ -38,13 +38,68 @@ uv sync
 uv pip install -e .
 ```
 
+## Setup
+
+```bash
+auto-file setup
+```
+
+The interactive wizard asks for three things:
+
+1. **Inbox** — the folder you drop unsorted files into (e.g. `~/Inbox`).
+2. **Destination root** — the folder where sorted files are filed (e.g. `~/SortedFiles`).
+3. **Folder structure file** — a YAML file defining where files go. If it
+   doesn't exist yet, setup generates a starter file from the built-in
+   defaults that you can edit.
+
+All three are plain config settings — change them any time:
+
+```bash
+auto-file config set inbox ~/Inbox
+auto-file config set dest ~/SortedFiles
+auto-file config set structure ~/.config/auto-file/folder_structure.yaml
+```
+
+## Folder structure file
+
+The destination folder tree (top-level folders, subfolders, and person
+names) lives in a YAML file, not in the code — edit it and the next run
+follows it. It is independent of the destination root, so you can point
+any root at the same structure:
+
+```yaml
+people: [Alpha, Bravo, Charlie, Delta, Echo]
+person_subfolders: [Records, Medical, Documents, Pictures, Misc]
+person_root: People
+roots:
+  Financial:
+    subfolders:
+      Bank Statements: {}
+      Bills: {subfolders: [Receipts, Due]}
+      Receipts: {keywords: [reciept]}
+      Documents: {}
+      Misc: {}
+  Misc: {}
+```
+
+- `people` are matched against names found in document content.
+- Each root may declare `role: Financial` (etc.) when renamed, so keyword
+  routing still finds it, and optional `keywords` add extra routing words.
+- Each subfolder may declare optional `keywords` matched against the file's
+  content.
+- If no structure file is configured, built-in defaults (matching
+  `FOLDER_STRUCTURE.md`) are used.
+
 ## CLI Usage
 
 ```bash
+# One-time interactive setup (inbox, destination, folder structure)
+auto-file setup
+
 # Preview what would be sorted without moving files
 auto-file sort ~/Downloads/statement.pdf --dry-run
 
-# Sort a file or an entire directory
+# Sort a file or an entire directory (defaults to the configured inbox)
 auto-file sort ~/Downloads/ --dest ~/SortedFiles
 
 # Watch an incoming inbox folder continuously
@@ -72,7 +127,7 @@ uv run pytest                # run the full test suite (152 tests)
 
 ```
 src/auto_file/
-├── cli.py                 # Typer CLI application (sort, history, undo, watch, config)
+├── cli.py                 # Typer CLI application (setup, sort, history, undo, watch, config)
 ├── config.py              # Configuration storage (~/.config/auto-file/config.json)
 ├── core/
 │   ├── detector.py        # MIME/metadata detection (magic bytes, SHA-256)
@@ -80,7 +135,8 @@ src/auto_file/
 │   ├── naming.py          # slug sanitization + collision resolution
 │   ├── dispatcher.py      # Laya tool dispatcher (ONNX + deterministic fallback)
 │   ├── understander.py    # Gemma 4 E2B content understander (4-bit multimodal)
-│   ├── router.py          # taxonomy routing against FOLDER_STRUCTURE.md
+│   ├── router.py          # keyword routing against the active Taxonomy
+│   ├── taxonomy.py        # YAML folder-structure loader + built-in defaults
 │   ├── executor.py        # pipeline orchestrator (detect -> move -> audit)
 │   └── watcher.py         # watchdog daemon with file write debounce
 └── storage/

@@ -1,4 +1,11 @@
-"""Taxonomical destination router for the Auto-File system."""
+"""Taxonomical destination router for the Auto-File system.
+
+Folder structure (roots, subfolders, person names) comes from a Taxonomy
+built by auto_file.core.taxonomy — either from a user-editable YAML
+structure file (config key ``structure``) or from the built-in defaults.
+Keyword heuristics decide the branch; the taxonomy decides the actual
+folder names.
+"""
 
 from __future__ import annotations
 
@@ -8,17 +15,212 @@ import re
 from typing import Any
 import unicodedata
 
+from auto_file.core.taxonomy import (
+    CANONICAL_PEOPLE,
+    ROOT_CATEGORIES,
+    Taxonomy,
+    default_taxonomy,
+)
+
 logger = logging.getLogger(__name__)
 
-CANONICAL_PEOPLE: list[str] = ["Alpha", "Bravo", "Charlie", "Delta", "Echo"]
+__all__ = [
+    "CANONICAL_PEOPLE",
+    "ROOT_CATEGORIES",
+    "TaxonomyRouter",
+    "resolve_destination",
+    "route_destination",
+    "sanitize_folder_name",
+]
 
-ROOT_CATEGORIES: list[str] = [
-    "People",
-    "Financial",
-    "Legal",
-    "Property",
-    "Manuals",
-    "Misc",
+
+# Slot groups: content keywords that select a branch or target folder. The
+# actual folder name is looked up in the active Taxonomy by name match or
+# configured keywords, so renamed/edited structure files keep working.
+_PERSON_MEDICAL_SLOTS = [
+    "medical",
+    "doctor",
+    "dr.",
+    "dr ",
+    "health",
+    "clinic",
+    "hospital",
+    "prescription",
+    "rx",
+    "dental",
+    "dentist",
+    "vision",
+    "physician",
+    "vaccine",
+    "vaccination",
+    "appointment",
+    "pharmacy",
+    "patient",
+]
+_PERSON_PICTURE_SLOTS = [
+    "picture",
+    "photo",
+    "image",
+    "portrait",
+    "snapshot",
+    "pic",
+    "gallery",
+]
+_PERSON_DOCUMENT_SLOTS = [
+    "document",
+    "docuement",
+    "doc",
+    "form",
+    "agreement",
+    "application",
+    "resume",
+    "cv",
+    "identification",
+    "id",
+    "passport",
+    "contract",
+    "letter",
+    "license",
+]
+_PERSON_RECORD_SLOTS = [
+    "record",
+    "birth certificate",
+    "transcript",
+    "diploma",
+    "school",
+    "grade",
+    "ssn",
+    "social security",
+    "vital record",
+    "certificate",
+    "immunization",
+]
+_PERSON_GENERIC_DOC_HINTS = {"doc", "form", "application", "agreement", "resume", "cv", "contract", "passport"}
+
+_ROOT_FINANCIAL_HINT_SLOTS = ["bank statement", "bill", "financial", "receipt", "tax", "w-2", "1099"]
+_ROOT_LEGAL_HINT_SLOTS = ["court", "lawsuit", "legal"]
+_ROOT_PROPERTY_HINT_SLOTS = ["vehicle", "real estate", "property"]
+_ROOT_MANUALS_HINT_SLOTS = ["manual", "user guide"]
+
+_FINANCIAL_SLOTS = [
+    "bank statement",
+    "bank account",
+    "checking statement",
+    "savings statement",
+    "bill",
+    "receipt",
+    "reciep",
+    "invoice",
+    "tax",
+    "w-2",
+    "1099",
+    "irs",
+    "financial",
+    "ledger",
+]
+_LEGAL_SLOTS = [
+    "court",
+    "case",
+    "docket",
+    "summons",
+    "subpoena",
+    "lawsuit",
+    "litigation",
+    "attorney",
+    "pleading",
+    "affidavit",
+    "legal",
+]
+_PROPERTY_SLOTS = [
+    "vehicle",
+    "car",
+    "truck",
+    "motorcycle",
+    "auto",
+    "real estate",
+    "house",
+    "home",
+    "mortgage",
+    "deed",
+    "property tax",
+    "lease",
+    "property",
+]
+_MANUALS_SLOTS = ["manual", "operating guide", "user guide", "instructions"]
+
+_BILLS_SLOTS = ["bill", "utility", "invoice", "power", "water bill", "electric"]
+_BILLS_PAID_SLOTS = ["receipt", "reciep", "paid", "confirmation", "payment"]
+_BILLS_DUE_SLOTS = ["due", "unpaid", "pending", "notice", "past due"]
+_RECEIPT_SLOTS = ["receipt", "reciep"]
+_FINANCIAL_DOCS_SLOTS = [
+    "tax",
+    "w-2",
+    "w2",
+    "1099",
+    "irs",
+    "investment",
+    "dividend",
+    "fidelity",
+    "vanguard",
+    "payroll",
+    "paystub",
+    "stub",
+    "document",
+]
+_COURT_SLOTS = [
+    "court",
+    "case",
+    "docket",
+    "summons",
+    "subpoena",
+    "lawsuit",
+    "litigation",
+    "pleading",
+    "affidavit",
+]
+_VEHICLE_SLOTS = ["vehicle", "car", "truck", "motorcycle", "auto", "vin"]
+_REAL_ESTATE_SLOTS = ["real estate", "house", "home", "mortgage", "deed", "property tax", "closing"]
+_APPLIANCE_SLOTS = [
+    "appliance",
+    "dishwasher",
+    "microwave",
+    "oven",
+    "refrigerator",
+    "fridge",
+    "washer",
+    "dryer",
+    "blender",
+    "toaster",
+    "stove",
+    "bosch",
+]
+_ELECTRONICS_SLOTS = [
+    "electronic",
+    "tv",
+    "television",
+    "oled",
+    "sony",
+    "samsung",
+    "radio",
+    "audio",
+    "speaker",
+    "computer",
+    "router",
+    "monitor",
+    "camera",
+    "headphone",
+]
+_TOOLS_SLOTS = [
+    "tool",
+    "drill",
+    "saw",
+    "mower",
+    "dewalt",
+    "milwaukee",
+    "makita",
+    "craftsman",
+    "hammer",
+    "wrench",
 ]
 
 
@@ -47,34 +249,64 @@ def _create_onnx_session(model_path: Path | str) -> Any:
 
 
 class TaxonomyRouter:
-    """Encodes the hierarchical taxonomy from FOLDER_STRUCTURE.md.
+    """Routes files into relative paths according to the active Taxonomy.
 
-    Routes files into relative paths according to classified entities,
-    semantic summary, and category hints.
+    Classification uses keyword heuristics over extracted entities, a
+    category hint, and a content summary; destination folder names are
+    resolved against the Taxonomy (built-in defaults or a YAML structure
+    file).
     """
 
     def __init__(
         self,
         model_path: Path | str | None = None,
         exact_spelling: bool = False,
+        taxonomy: Taxonomy | None = None,
     ) -> None:
         """Initialize the taxonomy router.
 
         Args:
             model_path: Optional path to Laya ONNX decision model weights.
-            exact_spelling: If True, uses verbatim spelling from FOLDER_STRUCTURE.md
-                (e.g. 'Docuements' and 'Reciepts'). Defaults to False (standard spelling).
+            exact_spelling: If True, the built-in default taxonomy reproduces
+                the verbatim spelling from the original FOLDER_STRUCTURE.md
+                (e.g. 'Docuements' and 'Reciepts'). Ignored when a custom
+                taxonomy is supplied.
+            taxonomy: Optional pre-built Taxonomy. When omitted, the built-in
+                default taxonomy is used.
         """
         self.default_model_path = Path(model_path) if model_path is not None else None
         self.exact_spelling = exact_spelling
+        self.taxonomy = taxonomy if taxonomy is not None else default_taxonomy(exact_spelling=exact_spelling)
 
     @property
     def doc_folder_name(self) -> str:
-        return "Docuements" if self.exact_spelling else "Documents"
+        folder = self.taxonomy.match_person_folder("document", "docuement")
+        return folder or ("Docuements" if self.exact_spelling else "Documents")
 
     @property
     def receipts_folder_name(self) -> str:
-        return "Reciepts" if self.exact_spelling else "Receipts"
+        financial = self._role_root("Financial")
+        folder = financial and self.taxonomy.child(financial, "receipt", "reciep")
+        return folder or ("Reciepts" if self.exact_spelling else "Receipts")
+
+    # -- taxonomy helpers --------------------------------------------------
+
+    def _role_root(self, role: str) -> str | None:
+        return self.taxonomy.root_for_role(role)
+
+    def _fallback_path(self) -> Path:
+        root = self.taxonomy.fallback_root()
+        return Path(root) if root else Path("Misc")
+
+    def _root_or_misc(self, root: str, combined: str = "") -> Path:
+        """Fallback under a root: keyword-matched child, then Misc, then root."""
+        hit = self.taxonomy.child_by_keywords(root, combined)
+        if hit:
+            return Path(root) / hit
+        misc = self.taxonomy.misc_child(root)
+        return Path(root) / misc if misc else Path(root)
+
+    # -- routing entry points ----------------------------------------------
 
     def resolve_destination(
         self,
@@ -165,11 +397,11 @@ class TaxonomyRouter:
                 else:
                     scores = list(raw_out)
 
-                if scores and len(scores) == len(ROOT_CATEGORIES):
+                if scores and len(scores) == len(self.taxonomy.roots):
                     max_idx = max(range(len(scores)), key=lambda i: scores[i])
-                    return ROOT_CATEGORIES[max_idx]
+                    return self.taxonomy.roots[max_idx]
 
-            if isinstance(raw_out, str) and raw_out in ROOT_CATEGORIES:
+            if isinstance(raw_out, str) and raw_out in self.taxonomy.roots:
                 return raw_out
 
             return None
@@ -179,20 +411,46 @@ class TaxonomyRouter:
 
     def _find_person(self, entities: list[str], hint: str, summary: str) -> str | None:
         """Find a canonical person name matching entities, summary, or hint."""
+        people = self.taxonomy.people
+        if not people:
+            return None
+
         # 1. Inspect explicit entities list
         for entity in entities:
             entity_norm = entity.strip().lower()
-            for person in CANONICAL_PEOPLE:
+            for person in people:
                 if person.lower() == entity_norm:
                     return person
 
         # 2. Inspect summary and hint using whole-word matching
         combined_text = f"{hint} {summary}".lower()
-        for person in CANONICAL_PEOPLE:
+        for person in people:
             pattern = rf"\b{re.escape(person.lower())}\b"
             if re.search(pattern, combined_text):
                 return person
 
+        return None
+
+    def _trigger(
+        self,
+        root: str | None,
+        onnx_root: str | None,
+        explicit: bool,
+        slots: list[str],
+        combined: str,
+    ) -> str | None:
+        """Return the root name when a file triggers its branch: ONNX vote,
+        explicit hint, built-in slot keywords, or extra keywords declared
+        on the root. Returns None otherwise."""
+        if root is None:
+            return None
+        if (
+            onnx_root == root
+            or explicit
+            or any(k in combined for k in slots)
+            or any(k in combined for k in self.taxonomy.root_keywords.get(root, []))
+        ):
+            return root
         return None
 
     def _resolve_hierarchy(
@@ -208,304 +466,156 @@ class TaxonomyRouter:
         combined = f"{hint_lower} {summary_lower}"
 
         person = self._find_person(entities, hint, summary)
+        person_root = self.taxonomy.person_root
 
         # Check if root is explicitly constrained to non-People by hints
-        is_explicit_financial = any(
-            k in hint_lower
-            for k in ["bank statement", "bill", "financial", "receipt", "tax", "w-2", "1099"]
-        )
-        is_explicit_legal = any(k in hint_lower for k in ["court", "lawsuit", "legal"])
-        is_explicit_property = any(k in hint_lower for k in ["vehicle", "real estate", "property"])
-        is_explicit_manuals = any(k in hint_lower for k in ["manual", "user guide"])
+        is_explicit_financial = any(k in hint_lower for k in _ROOT_FINANCIAL_HINT_SLOTS)
+        is_explicit_legal = any(k in hint_lower for k in _ROOT_LEGAL_HINT_SLOTS)
+        is_explicit_property = any(k in hint_lower for k in _ROOT_PROPERTY_HINT_SLOTS)
+        is_explicit_manuals = any(k in hint_lower for k in _ROOT_MANUALS_HINT_SLOTS)
 
         # ----------------------------------------------------------------------
         # Branch 1: People
         # ----------------------------------------------------------------------
-        if person is not None and not (
+        if person is not None and person_root is not None and not (
             is_explicit_financial or is_explicit_legal or is_explicit_property or is_explicit_manuals
         ):
-            return self._resolve_person_subpath(person, hint_lower, summary_lower, combined)
+            return self._resolve_person_subpath(person_root, person, hint_lower, summary_lower)
 
         # If onnx predicted People and person is known
-        if onnx_root == "People" and person is not None:
-            return self._resolve_person_subpath(person, hint_lower, summary_lower, combined)
+        if person_root is not None and onnx_root == person_root and person is not None:
+            return self._resolve_person_subpath(person_root, person, hint_lower, summary_lower)
 
         # ----------------------------------------------------------------------
         # Branch 2: Financial
         # ----------------------------------------------------------------------
-        if (
-            onnx_root == "Financial"
-            or is_explicit_financial
-            or any(
-                k in combined
-                for k in [
-                    "bank statement",
-                    "bank account",
-                    "checking statement",
-                    "savings statement",
-                    "bill",
-                    "receipt",
-                    "reciep",
-                    "invoice",
-                    "tax",
-                    "w-2",
-                    "1099",
-                    "irs",
-                    "financial",
-                    "ledger",
-                ]
-            )
-        ):
-            return self._resolve_financial_subpath(entities, hint_lower, summary_lower, combined)
+        financial = self._role_root("Financial")
+        financial = self._trigger(financial, onnx_root, is_explicit_financial, _FINANCIAL_SLOTS, combined)
+        if financial is not None:
+            return self._resolve_financial_subpath(financial, entities, hint_lower, summary_lower, combined)
 
         # ----------------------------------------------------------------------
         # Branch 3: Legal
         # ----------------------------------------------------------------------
-        if (
-            onnx_root == "Legal"
-            or is_explicit_legal
-            or any(
-                k in combined
-                for k in [
-                    "court",
-                    "case",
-                    "docket",
-                    "summons",
-                    "subpoena",
-                    "lawsuit",
-                    "litigation",
-                    "attorney",
-                    "pleading",
-                    "affidavit",
-                    "legal",
-                ]
-            )
-        ):
-            return self._resolve_legal_subpath(entities, hint_lower, summary_lower, combined)
+        legal = self._role_root("Legal")
+        legal = self._trigger(legal, onnx_root, is_explicit_legal, _LEGAL_SLOTS, combined)
+        if legal is not None:
+            return self._resolve_legal_subpath(legal, entities, hint_lower, summary_lower, combined)
 
         # ----------------------------------------------------------------------
         # Branch 4: Property
         # ----------------------------------------------------------------------
-        if (
-            onnx_root == "Property"
-            or is_explicit_property
-            or any(
-                k in combined
-                for k in [
-                    "vehicle",
-                    "car",
-                    "truck",
-                    "motorcycle",
-                    "auto",
-                    "real estate",
-                    "house",
-                    "home",
-                    "mortgage",
-                    "deed",
-                    "property tax",
-                    "lease",
-                    "property",
-                ]
-            )
-        ):
-            return self._resolve_property_subpath(entities, hint_lower, summary_lower, combined)
+        property_root = self._role_root("Property")
+        property_root = self._trigger(property_root, onnx_root, is_explicit_property, _PROPERTY_SLOTS, combined)
+        if property_root is not None:
+            return self._resolve_property_subpath(property_root, entities, hint_lower, summary_lower, combined)
 
         # ----------------------------------------------------------------------
         # Branch 5: Manuals
         # ----------------------------------------------------------------------
-        if (
-            onnx_root == "Manuals"
-            or is_explicit_manuals
-            or any(k in combined for k in ["manual", "operating guide", "user guide", "instructions"])
-        ):
-            return self._resolve_manuals_subpath(entities, hint_lower, summary_lower, combined)
+        manuals = self._role_root("Manuals")
+        manuals = self._trigger(manuals, onnx_root, is_explicit_manuals, _MANUALS_SLOTS, combined)
+        if manuals is not None:
+            return self._resolve_manuals_subpath(manuals, entities, hint_lower, summary_lower, combined)
 
         # ----------------------------------------------------------------------
         # Branch 6: Fallback to Person if person found earlier
         # ----------------------------------------------------------------------
-        if person is not None:
-            return self._resolve_person_subpath(person, hint_lower, summary_lower, combined)
+        if person is not None and person_root is not None:
+            return self._resolve_person_subpath(person_root, person, hint_lower, summary_lower)
 
         # Default fallback
-        return Path("Misc")
+        return self._fallback_path()
 
     def _resolve_person_subpath(
         self,
+        person_root: str,
         person: str,
         hint_lower: str,
         summary_lower: str,
-        combined: str,
     ) -> Path:
-        """Resolve subfolder under People/<Person>/."""
-        doc_folder = "Docuements" if (self.exact_spelling or "docuem" in hint_lower) else "Documents"
+        """Resolve subfolder under <person_root>/<Person>/."""
+        taxonomy = self.taxonomy
+
+        def folder_for(slots: list[str]) -> str | None:
+            return taxonomy.match_person_folder(*slots)
 
         # 1. Prioritize explicit category hint
-        if any(
-            k in hint_lower
-            for k in [
-                "medical",
-                "doctor",
-                "dr.",
-                "dr ",
-                "health",
-                "clinic",
-                "hospital",
-                "prescription",
-                "rx",
-                "dental",
-                "dentist",
-                "vision",
-                "physician",
-                "vaccine",
-                "vaccination",
-                "appointment",
-                "pharmacy",
-                "patient",
-            ]
-        ):
-            return Path("People") / person / "Medical"
+        if any(k in hint_lower for k in _PERSON_MEDICAL_SLOTS):
+            folder = folder_for(_PERSON_MEDICAL_SLOTS)
+            if folder:
+                return Path(person_root) / person / folder
 
-        if any(
-            k in hint_lower
-            for k in [
-                "picture",
-                "photo",
-                "image",
-                "portrait",
-                "snapshot",
-                "pic",
-                "gallery",
-            ]
-        ):
-            return Path("People") / person / "Pictures"
+        if any(k in hint_lower for k in _PERSON_PICTURE_SLOTS):
+            folder = folder_for(_PERSON_PICTURE_SLOTS)
+            if folder:
+                return Path(person_root) / person / folder
 
-        if any(k in hint_lower for k in ["docuement", "document"]):
-            return Path("People") / person / doc_folder
+        if any(k in hint_lower for k in ["docuement", "document"]) or hint_lower in _PERSON_GENERIC_DOC_HINTS:
+            folder = folder_for(_PERSON_DOCUMENT_SLOTS)
+            if folder:
+                return Path(person_root) / person / folder
 
-        if any(
-            k in hint_lower
-            for k in [
-                "record",
-                "birth certificate",
-                "transcript",
-                "diploma",
-                "ssn",
-                "social security",
-                "vital record",
-                "certificate",
-                "immunization",
-            ]
-        ):
-            return Path("People") / person / "Records"
-
-        if hint_lower in {"doc", "form", "application", "agreement", "resume", "cv", "contract", "passport"}:
-            return Path("People") / person / doc_folder
+        if any(k in hint_lower for k in _PERSON_RECORD_SLOTS):
+            folder = folder_for(_PERSON_RECORD_SLOTS)
+            if folder:
+                return Path(person_root) / person / folder
 
         if hint_lower in {"misc", "general"}:
-            return Path("People") / person / "Misc"
+            misc = taxonomy.person_misc_folder()
+            if misc:
+                return Path(person_root) / person / misc
 
         # 2. Inspect summary text when hint is generic or absent
-        if any(
-            k in summary_lower
-            for k in [
-                "medical",
-                "doctor",
-                "dr.",
-                "dr ",
-                "health",
-                "clinic",
-                "hospital",
-                "prescription",
-                "rx",
-                "dental",
-                "dentist",
-                "vision",
-                "physician",
-                "vaccine",
-                "vaccination",
-                "appointment",
-                "pharmacy",
-                "patient",
-            ]
-        ):
-            return Path("People") / person / "Medical"
+        if any(k in summary_lower for k in _PERSON_MEDICAL_SLOTS):
+            folder = folder_for(_PERSON_MEDICAL_SLOTS)
+            if folder:
+                return Path(person_root) / person / folder
 
-        if any(
-            k in summary_lower
-            for k in [
-                "picture",
-                "photo",
-                "image",
-                "portrait",
-                "snapshot",
-                "pic",
-                "gallery",
-            ]
-        ):
-            return Path("People") / person / "Pictures"
+        if any(k in summary_lower for k in _PERSON_PICTURE_SLOTS):
+            folder = folder_for(_PERSON_PICTURE_SLOTS)
+            if folder:
+                return Path(person_root) / person / folder
 
-        if any(
-            k in summary_lower
-            for k in [
-                "document",
-                "doc",
-                "docuement",
-                "form",
-                "agreement",
-                "application",
-                "resume",
-                "cv",
-                "identification",
-                "id",
-                "passport",
-                "contract",
-                "letter",
-                "license",
-            ]
-        ):
-            return Path("People") / person / doc_folder
+        if any(k in summary_lower for k in _PERSON_DOCUMENT_SLOTS):
+            folder = folder_for(_PERSON_DOCUMENT_SLOTS)
+            if folder:
+                return Path(person_root) / person / folder
 
-        if any(
-            k in summary_lower
-            for k in [
-                "record",
-                "birth certificate",
-                "transcript",
-                "diploma",
-                "school",
-                "grade",
-                "ssn",
-                "social security",
-                "vital record",
-                "certificate",
-                "immunization",
-            ]
-        ):
-            return Path("People") / person / "Records"
+        if any(k in summary_lower for k in _PERSON_RECORD_SLOTS):
+            folder = folder_for(_PERSON_RECORD_SLOTS)
+            if folder:
+                return Path(person_root) / person / folder
 
         # Default for person
-        return Path("People") / person / "Misc"
+        misc = taxonomy.person_misc_folder()
+        return Path(person_root) / person / misc if misc else Path(person_root) / person
 
     def _resolve_financial_subpath(
         self,
+        financial: str,
         entities: list[str],
         hint_lower: str,
         summary_lower: str,
         combined: str,
     ) -> Path:
         """Resolve subfolder under Financial/."""
-        receipts_name = "Reciepts" if (self.exact_spelling or "reciep" in hint_lower) else "Receipts"
+        taxonomy = self.taxonomy
+
+        def first_entity() -> str | None:
+            if not entities:
+                return None
+            return sanitize_folder_name(entities[0]) or None
 
         # 1. Bank Statements
-        if any(
-            k in combined
-            for k in [
-                "bank statement",
-                "account statement",
-                "checking statement",
-                "savings statement",
-            ]
-        ) or (hint_lower == "bank statement"):
+        bank = taxonomy.child(financial, "bank statement")
+        if bank and (
+            any(
+                k in combined
+                for k in ["bank statement", "account statement", "checking statement", "savings statement"]
+            )
+            or hint_lower == "bank statement"
+        ):
             if entities:
                 # Pick entity: prefer entity matching summary, or non-numeric entity
                 selected = entities[0]
@@ -517,172 +627,107 @@ class TaxonomyRouter:
                         selected = ent
                 clean_ent = sanitize_folder_name(selected)
                 if clean_ent:
-                    return Path("Financial") / "Bank Statements" / clean_ent
-            return Path("Financial") / "Bank Statements"
+                    return Path(financial) / bank / clean_ent
+            return Path(financial) / bank
 
         # 2. Bills
-        if any(k in combined for k in ["bill", "utility", "invoice", "power", "water bill", "electric"]):
-            if any(k in combined for k in ["receipt", "reciep", "paid", "confirmation", "payment"]):
-                return Path("Financial") / "Bills" / receipts_name
-            if any(k in combined for k in ["due", "unpaid", "pending", "notice", "past due"]):
-                return Path("Financial") / "Bills" / "Due"
+        bills = taxonomy.child(financial, "bill")
+        if bills and any(k in combined for k in _BILLS_SLOTS):
+            if any(k in combined for k in _BILLS_PAID_SLOTS):
+                receipt_folder = taxonomy.grandchild(financial, bills, *_RECEIPT_SLOTS)
+                if receipt_folder:
+                    return Path(financial) / bills / receipt_folder
+            due_folder = taxonomy.grandchild(financial, bills, "due", "unpaid", "pending")
+            if due_folder:
+                return Path(financial) / bills / due_folder
             # Default for bill
-            return Path("Financial") / "Bills" / "Due"
+            return Path(financial) / bills
 
         # 3. Receipts
-        if any(k in combined for k in ["receipt", "reciep"]):
-            if entities:
-                clean_ent = sanitize_folder_name(entities[0])
-                if clean_ent:
-                    return Path("Financial") / receipts_name / clean_ent
-            return Path("Financial") / receipts_name
+        receipts = taxonomy.child(financial, *_RECEIPT_SLOTS)
+        if receipts and any(k in combined for k in _RECEIPT_SLOTS):
+            clean_ent = first_entity()
+            if clean_ent:
+                return Path(financial) / receipts / clean_ent
+            return Path(financial) / receipts
 
         # 4. Documents (e.g. Tax, IRS, Investment)
-        if any(
-            k in combined
-            for k in [
-                "tax",
-                "w-2",
-                "w2",
-                "1099",
-                "irs",
-                "investment",
-                "dividend",
-                "fidelity",
-                "vanguard",
-                "payroll",
-                "paystub",
-                "stub",
-                "document",
-            ]
-        ):
-            if entities:
-                clean_ent = sanitize_folder_name(entities[0])
-                if clean_ent:
-                    return Path("Financial") / "Documents" / clean_ent
-            return Path("Financial") / "Documents"
+        documents = taxonomy.child(financial, "document")
+        if documents and any(k in combined for k in _FINANCIAL_DOCS_SLOTS):
+            clean_ent = first_entity()
+            if clean_ent:
+                return Path(financial) / documents / clean_ent
+            return Path(financial) / documents
 
         # Default for financial
-        return Path("Financial") / "Misc"
+        return self._root_or_misc(financial, combined)
 
     def _resolve_legal_subpath(
         self,
+        legal: str,
         entities: list[str],
         hint_lower: str,
         summary_lower: str,
         combined: str,
     ) -> Path:
         """Resolve subfolder under Legal/."""
-        if any(
-            k in combined
-            for k in [
-                "court",
-                "case",
-                "docket",
-                "summons",
-                "subpoena",
-                "lawsuit",
-                "litigation",
-                "pleading",
-                "affidavit",
-            ]
-        ):
+        court = self.taxonomy.child(legal, "court")
+        if court and any(k in combined for k in _COURT_SLOTS):
             if entities:
                 clean_case = sanitize_folder_name(entities[0])
                 if clean_case:
-                    return Path("Legal") / "Court" / clean_case
-            return Path("Legal") / "Court"
+                    return Path(legal) / court / clean_case
+            return Path(legal) / court
 
-        return Path("Legal") / "Misc"
+        return self._root_or_misc(legal, combined)
 
     def _resolve_property_subpath(
         self,
+        property_root: str,
         entities: list[str],
         hint_lower: str,
         summary_lower: str,
         combined: str,
     ) -> Path:
         """Resolve subfolder under Property/."""
-        if any(k in combined for k in ["vehicle", "car", "truck", "motorcycle", "auto", "vin"]):
-            return Path("Property") / "Vehicles"
+        vehicles = self.taxonomy.child(property_root, "vehicle")
+        if vehicles and any(k in combined for k in _VEHICLE_SLOTS):
+            return Path(property_root) / vehicles
 
-        if any(
-            k in combined
-            for k in ["real estate", "house", "home", "mortgage", "deed", "property tax", "closing"]
-        ):
-            return Path("Property") / "Real Estate"
+        real_estate = self.taxonomy.child(property_root, "real estate")
+        if real_estate and any(k in combined for k in _REAL_ESTATE_SLOTS):
+            return Path(property_root) / real_estate
 
-        return Path("Property") / "Misc"
+        return self._root_or_misc(property_root, combined)
 
     def _resolve_manuals_subpath(
         self,
+        manuals: str,
         entities: list[str],
         hint_lower: str,
         summary_lower: str,
         combined: str,
     ) -> Path:
         """Resolve subfolder under Manuals/."""
-        if any(
-            k in combined
-            for k in [
-                "appliance",
-                "dishwasher",
-                "microwave",
-                "oven",
-                "refrigerator",
-                "fridge",
-                "washer",
-                "dryer",
-                "blender",
-                "toaster",
-                "stove",
-                "bosch",
-            ]
-        ):
-            return Path("Manuals") / "Appliances"
+        taxonomy = self.taxonomy
 
-        if any(
-            k in combined
-            for k in [
-                "electronic",
-                "tv",
-                "television",
-                "oled",
-                "sony",
-                "samsung",
-                "radio",
-                "audio",
-                "speaker",
-                "computer",
-                "router",
-                "monitor",
-                "camera",
-                "headphone",
-            ]
-        ):
-            return Path("Manuals") / "Electronics"
+        appliances = taxonomy.child(manuals, "appliance")
+        if appliances and any(k in combined for k in _APPLIANCE_SLOTS):
+            return Path(manuals) / appliances
 
-        if any(k in combined for k in ["vehicle", "car", "truck", "motorcycle", "auto"]):
-            return Path("Manuals") / "Vehicles"
+        electronics = taxonomy.child(manuals, "electronic")
+        if electronics and any(k in combined for k in _ELECTRONICS_SLOTS):
+            return Path(manuals) / electronics
 
-        if any(
-            k in combined
-            for k in [
-                "tool",
-                "drill",
-                "saw",
-                "mower",
-                "dewalt",
-                "milwaukee",
-                "makita",
-                "craftsman",
-                "hammer",
-                "wrench",
-            ]
-        ):
-            return Path("Manuals") / "Tools"
+        vehicles = taxonomy.child(manuals, "vehicle")
+        if vehicles and any(k in combined for k in _VEHICLE_SLOTS):
+            return Path(manuals) / vehicles
 
-        return Path("Manuals") / "General"
+        tools = taxonomy.child(manuals, "tool")
+        if tools and any(k in combined for k in _TOOLS_SLOTS):
+            return Path(manuals) / tools
+
+        return self._root_or_misc(manuals, combined)
 
 
 def resolve_destination(
@@ -690,9 +735,15 @@ def resolve_destination(
     category_hint: str | None = None,
     summary: str | None = None,
     model_path: Path | str | None = None,
+    structure: Path | str | None = None,
 ) -> Path:
     """Convenience top-level function to resolve file destination relative path."""
-    return TaxonomyRouter(model_path=model_path).resolve_destination(
+    taxonomy = None
+    if structure is not None:
+        from auto_file.core.taxonomy import load_taxonomy
+
+        taxonomy = load_taxonomy(structure)
+    return TaxonomyRouter(model_path=model_path, taxonomy=taxonomy).resolve_destination(
         entities=entities,
         category_hint=category_hint,
         summary=summary,
@@ -705,6 +756,7 @@ def route_destination(
     entities: list[str] | None = None,
     category_hint: str | None = None,
     model_path: Path | str | None = None,
+    structure: Path | str | None = None,
 ) -> Path:
     """Convenience top-level function with alternative argument ordering."""
     return resolve_destination(
@@ -712,4 +764,5 @@ def route_destination(
         category_hint=category_hint,
         summary=summary,
         model_path=model_path,
+        structure=structure,
     )
