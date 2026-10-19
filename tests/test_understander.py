@@ -624,7 +624,7 @@ def test_llama_server_manager_bad_binary_falls_back():
     mgr = LlamaServerManager(
         binary="/nonexistent/llama-server",
         model="/nonexistent/model.gguf",
-        port=8082,
+        port=8099,  # unused port: nothing healthy to adopt
         idle_seconds=60,
         start_timeout=3,
     )
@@ -639,7 +639,7 @@ def test_understander_ondemand_spawn_failure_uses_deterministic_gate():
         llama_server={
             "binary": "/nonexistent/llama-server",
             "model": "/nonexistent/model.gguf",
-            "port": 8082,
+            "port": 8099,
             "idle_seconds": 60,
             "start_timeout": 3,
         }
