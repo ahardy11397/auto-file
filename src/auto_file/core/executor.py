@@ -112,6 +112,59 @@ class FilePipelineExecutor:
         else:
             self.router = TaxonomyRouter(model_path=laya_model_path, exact_spelling=exact_spelling)
 
+    def _needs_review_result(
+        self,
+        orig_path: Path,
+        metadata: Any,
+        tool_name: str,
+        reason: str,
+        dry_run: bool,
+        run_id: str | None,
+    ) -> PipelineResult:
+        """Build a needs_review result: the file stays untouched in place."""
+        details: dict[str, Any] = {
+            "mime_type": metadata.mime_type,
+            "sha256": metadata.sha256,
+            "tool_selected": tool_name,
+            "date_value": metadata.mtime.strftime("%Y-%m-%d"),
+            "reason": reason,
+        }
+        if not dry_run and self.audit_ledger is not None:
+            active_run_id = run_id
+            need_finish = False
+            if active_run_id is None:
+                active_run_id = self.audit_ledger.start_run(
+                    mode="cli_single",
+                    source_root=orig_path,
+                    target_root=self.target_root,
+                )
+                need_finish = True
+            event_id = self.audit_ledger.record_event(
+                run_id=active_run_id,
+                original_path=orig_path,
+                destination_path=orig_path,
+                sha256=metadata.sha256,
+                file_size=metadata.size_bytes,
+                date_source="none",
+                date_value="",
+                description="needs_review",
+                laya_tool_selected=tool_name,
+                laya_category_selected=reason,
+                status="needs_review",
+            )
+            details["audit_event_id"] = event_id
+            details["audit_run_id"] = active_run_id
+            if need_finish:
+                self.audit_ledger.finish_run(active_run_id)
+
+        return PipelineResult(
+            status="needs_review",
+            original_path=orig_path,
+            destination_path=orig_path,
+            proposed_relative_path=Path("_needs_review") / orig_path.name,
+            details=details,
+        )
+
     def process_file(
         self,
         file_path: Path | str,
@@ -156,60 +209,50 @@ class FilePipelineExecutor:
             understanding = self.understander.understand(extracted, filename_hint=orig_path.name)
 
             # 4.5 Understanding gate: when the understander could not
-            # confidently read the document (a scan with no text, no known
-            # owner, nothing recognizable), leave it untouched in the inbox
+            # confidently read the document, leave it untouched in the inbox
             # for manual review instead of renaming it into a generic folder.
             if not getattr(understanding, "understood", True):
-                gate_details: dict[str, Any] = {
-                    "mime_type": metadata.mime_type,
-                    "sha256": metadata.sha256,
-                    "tool_selected": tool_name,
-                    "date_value": metadata.mtime.strftime("%Y-%m-%d"),
-                    "reason": "insufficient_understanding",
-                }
-                if not dry_run and self.audit_ledger is not None:
-                    active_run_id = run_id
-                    need_finish = False
-                    if active_run_id is None:
-                        active_run_id = self.audit_ledger.start_run(
-                            mode="cli_single",
-                            source_root=orig_path,
-                            target_root=self.target_root,
-                        )
-                        need_finish = True
-                    event_id = self.audit_ledger.record_event(
-                        run_id=active_run_id,
-                        original_path=orig_path,
-                        destination_path=orig_path,
-                        sha256=metadata.sha256,
-                        file_size=metadata.size_bytes,
-                        date_source="none",
-                        date_value="",
-                        description="needs_review",
-                        laya_tool_selected=tool_name,
-                        laya_category_selected="",
-                        status="needs_review",
-                    )
-                    gate_details["audit_event_id"] = event_id
-                    gate_details["audit_run_id"] = active_run_id
-                    if need_finish:
-                        self.audit_ledger.finish_run(active_run_id)
-
-                return PipelineResult(
-                    status="needs_review",
-                    original_path=orig_path,
-                    destination_path=orig_path,
-                    proposed_relative_path=Path("_needs_review") / orig_path.name,
-                    details=gate_details,
+                return self._needs_review_result(
+                    orig_path, metadata, tool_name, "insufficient_understanding", dry_run, run_id
                 )
 
-            # 5. Taxonomy destination routing
-            relative_folder = self.router.resolve_destination(
-                entities=understanding.detected_entities,
-                category_hint=understanding.category_hint,
-                summary=understanding.summary,
-                filename_hint=orig_path.name,
-            )
+            # 5. Destination routing — LLM picks from the real folder tree
+            # when available; the keyword router is the no-LLM fallback. An
+            # LLM that cannot pick a fitting folder gates to needs_review
+            # rather than guessing.
+            if self.understander.has_llm_routing:
+                status, chosen = self.understander.route_with_llama(
+                    filename=orig_path.name,
+                    summary=understanding.summary,
+                    description=understanding.file_description,
+                    content_date=understanding.content_date,
+                    folder_choices=self.router.taxonomy.all_paths(),
+                )
+                if status == "ok":
+                    canonical = self.router.taxonomy.is_valid_folder(chosen or "")
+                    if canonical is None:
+                        return self._needs_review_result(
+                            orig_path, metadata, tool_name, "llm_invalid_folder", dry_run, run_id
+                        )
+                    relative_folder = Path(canonical)
+                elif status == "unreachable":
+                    relative_folder = self.router.resolve_destination(
+                        entities=understanding.detected_entities,
+                        category_hint=understanding.category_hint,
+                        summary=understanding.summary,
+                        filename_hint=orig_path.name,
+                    )
+                else:
+                    return self._needs_review_result(
+                        orig_path, metadata, tool_name, "llm_could_not_route", dry_run, run_id
+                    )
+            else:
+                relative_folder = self.router.resolve_destination(
+                    entities=understanding.detected_entities,
+                    category_hint=understanding.category_hint,
+                    summary=understanding.summary,
+                    filename_hint=orig_path.name,
+                )
 
             # 6. Date precedence: content date if present, fallback to filesystem mtime YYYY-MM-DD
             if understanding.content_date and understanding.content_date.strip():

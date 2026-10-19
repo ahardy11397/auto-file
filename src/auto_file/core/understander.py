@@ -961,32 +961,26 @@ class GemmaUnderstander:
             logger.warning("Neural understanding failed (%s); falling back to deterministic mode", exc)
             return self._understand_deterministic(content, filename_hint)
 
-    def _understand_via_llama_server(
+    def _chat(
         self,
-        content: ExtractedContent,
-        filename_hint: str | None = None,
+        prompt: str,
+        image_content: Any = None,
         url: str | None = None,
-    ) -> UnderstandingResult | None:
-        """Understand via the packaged llama.cpp OpenAI-compatible server.
-
-        Returns None when the server is unreachable so the caller can fall
-        back to the deterministic path. Vision: extracted page images are
-        sent as base64 data URLs when the server was started with an mmproj.
-        """
+        max_tokens: int = 1024,
+    ) -> str | None:
+        """Send one chat request to the llama.cpp server; returns the raw
+        assistant content, or None when the server is unreachable."""
         import base64
         import io
         import json as _json
         import urllib.request
 
-        prompt = self.generate_prompt(content, filename_hint)
-        content_parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
-        if content.image_content is not None:
+        parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        if image_content is not None:
             buf = io.BytesIO()
-            content.image_content.save(buf, format="PNG")
+            image_content.save(buf, format="PNG")
             b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-            content_parts.append(
-                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
-            )
+            parts.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
 
         payload = _json.dumps(
             {
@@ -995,14 +989,14 @@ class GemmaUnderstander:
                     {
                         "role": "system",
                         "content": (
-                            "You are a document classifier. Respond with ONLY the requested "
-                            "JSON object. Do not think out loud and do not explain."
+                            "You are a precise assistant. Follow the requested "
+                            "output format exactly. Do not think out loud."
                         ),
                     },
-                    {"role": "user", "content": content_parts},
+                    {"role": "user", "content": parts},
                 ],
                 "temperature": 0,
-                "max_tokens": 1024,
+                "max_tokens": max_tokens,
                 "stream": False,
                 "chat_template_kwargs": {"enable_thinking": False},
             }
@@ -1019,18 +1013,32 @@ class GemmaUnderstander:
             message = body["choices"][0]["message"]
             # Thinking-disabled servers fill content; if thinking still leaks
             # into reasoning_content, fall back to parsing that.
-            raw_output = message.get("content") or message.get("reasoning_content") or ""
+            return message.get("content") or message.get("reasoning_content") or ""
         except Exception as exc:
-            logger.warning("LLM server at %s unreachable or failed (%s); using deterministic fallback", url or self.llama_url, exc)
+            logger.warning(
+                "LLM server at %s unreachable or failed (%s)", url or self.llama_url, exc
+            )
+            return None
+
+    def _understand_via_llama_server(
+        self,
+        content: ExtractedContent,
+        filename_hint: str | None = None,
+        url: str | None = None,
+    ) -> UnderstandingResult | None:
+        """Understand via the packaged llama.cpp server. Returns None when the
+        server is unreachable so the caller can fall back deterministically."""
+        prompt = self.generate_prompt(content, filename_hint)
+        raw_output = self._chat(prompt, content.image_content, url)
+        if raw_output is None:
             return None
 
         try:
             result = parse_llm_json_response(raw_output)
 
             # Garbage check: the model ran but understood nothing (empty
-            # output, or it punted to a generic/unclassified category with
-            # nothing usable for a description) — flag for review instead of
-            # renaming the file into a generic folder.
+            # output, or it punted to a generic/unclassified category) —
+            # flag for review instead of renaming into a generic folder.
             raw_clean = (raw_output or "").strip()
             uninformative = result.category_hint in {
                 "",
@@ -1049,6 +1057,67 @@ class GemmaUnderstander:
         except Exception as exc:
             logger.warning("LLM server output could not be parsed (%s); using deterministic fallback", exc)
             return None
+
+    @property
+    def has_llm_routing(self) -> bool:
+        """True when an LLM is available for folder routing."""
+        return not self.mock and (self.llama_url is not None or self._server_mgr is not None)
+
+    def route_with_llama(
+        self,
+        filename: str,
+        summary: str,
+        description: str,
+        content_date: str | None,
+        folder_choices: list[str],
+        url: str | None = None,
+    ) -> tuple[str, str | None]:
+        """Ask the LLM to choose a destination folder from the real tree.
+
+        Returns (status, folder) with status in:
+          'ok'          — the model chose a path (validity checked by caller)
+          'none'        — the model said no folder fits
+          'unreachable' — the LLM server could not be reached
+        """
+        if not folder_choices:
+            return "unreachable", None
+        listing = "\n".join(f"- {p}" for p in folder_choices)
+        prompt = (
+            "You are a file-routing assistant for a personal document cabinet.\n"
+            "Choose the single best destination folder for this document. You MUST "
+            "choose a path exactly as written in the list. If no folder is "
+            "appropriate, answer NONE.\n\n"
+            f"File name: {filename}\n"
+            f"Summary: {summary or '(none)'}\n"
+            f"Description: {description or '(none)'}\n"
+            f"Document date: {content_date or 'unknown'}\n\n"
+            f"Available folders:\n{listing}\n\n"
+            'Respond with ONLY JSON: {"folder": "<path from the list or NONE>"}'
+        )
+        raw = self._chat(
+            prompt,
+            None,
+            url or (self._server_mgr.url if self._server_mgr else None),
+            max_tokens=400,
+        )
+        if raw is None:
+            return "unreachable", None
+
+        folder = None
+        cleaned = (raw or "").strip()
+        fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", cleaned)
+        if fence:
+            cleaned = fence.group(1).strip()
+        try:
+            data = json.loads(cleaned)
+            folder = str(data.get("folder") or "").strip()
+        except Exception:
+            match = re.search(r'"folder"\s*:\s*"([^"]+)"', cleaned)
+            folder = match.group(1).strip() if match else None
+
+        if not folder or folder.upper() == "NONE":
+            return "none", None
+        return "ok", folder
 
     def __call__(
         self,

@@ -17,6 +17,7 @@ import unicodedata
 
 from auto_file.core.taxonomy import (
     CANONICAL_PEOPLE,
+    sanitize_folder_name,
     ROOT_CATEGORIES,
     Taxonomy,
     default_taxonomy,
@@ -225,20 +226,6 @@ _TOOLS_SLOTS = [
     "hammer",
     "wrench",
 ]
-
-
-def sanitize_folder_name(name: str) -> str:
-    """Sanitize an entity, case, or account string for directory path safety."""
-    if not name:
-        return ""
-    # Normalize unicode to ASCII base equivalents
-    text = unicodedata.normalize("NFKD", name)
-    text = text.encode("ascii", "ignore").decode("ascii")
-    # Replace non-alphanumeric and non-hyphen/period characters with underscore
-    text = re.sub(r"[^\w\-.]+", "_", text)
-    # Collapse consecutive underscores
-    text = re.sub(r"_+", "_", text)
-    return text.strip("_")
 
 
 def _create_onnx_session(model_path: Path | str) -> Any:

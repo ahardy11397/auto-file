@@ -525,3 +525,97 @@ def test_pipeline_moves_when_understanding_is_specific(tmp_path: Path):
     result = executor.process_file(test_file, dry_run=False)
     assert result.status == "moved"
     assert not test_file.exists()
+
+
+# ==============================================================================
+# LLM Folder Routing Tests (Gemma picks from the real tree)
+# ==============================================================================
+
+
+class _RoutingStubUnderstander:
+    """Stub with LLM routing: understands always, routes per configured status."""
+
+    def __init__(self, status: str, folder: str | None = None):
+        self._status = status
+        self._folder = folder
+        self.has_llm_routing = True
+        self.last_choices: list[str] | None = None
+
+    def understand(self, content, filename_hint=None):
+        return UnderstandingResult(
+            content_date="2026-01-05",
+            file_description="test_document",
+            detected_entities=["Target"],
+            category_hint="Receipt",
+            summary="Receipt from Target for $23.45.",
+            understood=True,
+        )
+
+    def route_with_llama(self, filename, summary, description, content_date, folder_choices, url=None):
+        self.last_choices = list(folder_choices)
+        return self._status, self._folder
+
+
+def _make_executor(tmp_path: Path, understander):
+    ledger = AuditLedger(tmp_path / "audit.db")
+    return FilePipelineExecutor(target_root=tmp_path / "sorted", audit_ledger=ledger, understander=understander)
+
+
+def test_llm_routing_moves_to_chosen_folder(tmp_path: Path):
+    src_dir = tmp_path / "inbox"; src_dir.mkdir()
+    f = src_dir / "receipt.txt"
+    f.write_text("Receipt from Target, purchase total $23.45, paid with card. Thank you for shopping with us today.", encoding="utf-8")
+
+    stub = _RoutingStubUnderstander("ok", "Financial/Bills")
+    executor = _make_executor(tmp_path, stub)
+    result = executor.process_file(f, dry_run=False)
+
+    assert result.status == "moved"
+    assert result.destination_path.parent == tmp_path / "sorted" / "Financial" / "Bills"
+    # The model saw the real folder tree
+    assert "Financial/Bills" in stub.last_choices and "Misc" in stub.last_choices
+
+
+def test_llm_routing_none_gates_to_needs_review(tmp_path: Path):
+    src_dir = tmp_path / "inbox"; src_dir.mkdir()
+    f = src_dir / "mystery.txt"
+    f.write_text("Totally unclassifiable content." * 3, encoding="utf-8")
+
+    stub = _RoutingStubUnderstander("none", None)
+    executor = _make_executor(tmp_path, stub)
+    result = executor.process_file(f, dry_run=False)
+
+    assert result.status == "needs_review"
+    assert f.exists()  # untouched
+
+
+def test_llm_routing_invalid_folder_gates_to_needs_review(tmp_path: Path):
+    src_dir = tmp_path / "inbox"; src_dir.mkdir()
+    f = src_dir / "doc.txt"
+    f.write_text("Receipt from Target, purchase total $23.45, paid with card. Thank you for shopping with us today.", encoding="utf-8")
+
+    stub = _RoutingStubUnderstander("ok", "Financial/Bogus/MadeUp")
+    executor = _make_executor(tmp_path, stub)
+    result = executor.process_file(f, dry_run=False)
+
+    assert result.status == "needs_review"
+    assert f.exists()
+
+
+def test_llm_routing_unreachable_falls_back_to_keyword_router(tmp_path: Path):
+    src_dir = tmp_path / "inbox"; src_dir.mkdir()
+    f = src_dir / "vehicle_registration.txt"
+    f.write_text(
+        "Vehicle registration document for Honda Civic, VIN 1HGCM82633A004352, "
+        "registered owner Alpha Hardy, issued by the department of motor vehicles "
+        "and valid through the end of next year, keep in the vehicle at all times.",
+        encoding="utf-8",
+    )
+
+    stub = _RoutingStubUnderstander("unreachable", None)
+    executor = _make_executor(tmp_path, stub)
+    result = executor.process_file(f, dry_run=False)
+
+    # No LLM reachable → the keyword router handles it (Property/Vehicles)
+    assert result.status == "moved"
+    assert str(result.proposed_relative_path).startswith("Financial/")

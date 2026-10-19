@@ -38,6 +38,8 @@ YAML schema (all keys optional unless noted)::
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
+import unicodedata
 from pathlib import Path
 
 import yaml
@@ -103,6 +105,9 @@ class Taxonomy:
     person_subfolders: list[str] = field(default_factory=lambda: list(DEFAULT_PERSON_SUBFOLDERS))
     people: list[str] = field(default_factory=list)
     roles: dict[str, str] = field(default_factory=dict)
+    # Child folders (keyed "root/child" normalized) that accept a dynamic
+    # final component — the "by entity" folders (Bills/<vendor>, Court/<case>).
+    dynamic_children: dict[str, set[str]] = field(default_factory=dict)
 
     # -- lookups used by the router --------------------------------------
 
@@ -156,6 +161,52 @@ class Taxonomy:
                     return (child, descendant)
         return None
 
+    def all_paths(self) -> list[str]:
+        """Every folder path in the tree, as 'Root/Child/Grandchild' strings."""
+        out: list[str] = []
+        for root in self.roots:
+            out.append(root)
+            for child in self.children.get(root, []):
+                out.append(f"{root}/{child}")
+                for grandchild in self.grandchildren.get(root, {}).get(child, []):
+                    out.append(f"{root}/{child}/{grandchild}")
+        return out
+
+    def is_valid_folder(self, path: str) -> str | None:
+        """Validate an LLM-chosen folder path against the tree.
+
+        Returns the canonical path when every component matches a tree node
+        (case/spacing-insensitive), allowing one dynamic final component
+        under a folder marked 'dynamic: true'. Returns None when invalid.
+        """
+        parts = [_norm(p) for p in path.split("/") if p.strip()]
+        if not parts:
+            return None
+        root = next((r for r in self.roots if _norm(r) == parts[0]), None)
+        if root is None:
+            return None
+        if len(parts) == 1:
+            return root
+        child = next((c for c in self.children.get(root, []) if _norm(c) == parts[1]), None)
+        if child is None:
+            return None
+        if len(parts) == 2:
+            return f"{root}/{child}"
+        if len(parts) > 3:
+            return None
+        grandchild = next(
+            (g for g in self.grandchildren.get(root, {}).get(child, []) if _norm(g) == parts[2]),
+            None,
+        )
+        if grandchild is not None:
+            return f"{root}/{child}/{grandchild}"
+        # Dynamic final component under a 'by entity' folder
+        if child_key(child) in self.dynamic_children.get(child_key(root), set()):
+            entity = sanitize_folder_name(parts[2])
+            if entity:
+                return f"{root}/{child}/{entity}"
+        return None
+
     def misc_child(self, root: str) -> str | None:
         """Find the catch-all child of ``root`` (Misc/General/Other), if any."""
         for child in self.children.get(root, []):
@@ -206,6 +257,17 @@ class Taxonomy:
         return None
 
 
+def sanitize_folder_name(name: str) -> str:
+    """Sanitize an entity, case, or account string for directory path safety."""
+    if not name:
+        return ""
+    text = unicodedata.normalize("NFKD", name)
+    text = text.encode("ascii", "ignore").decode("ascii")
+    text = re.sub(r"[^\w\-.]+", "_", text)
+    text = re.sub(r"_+", "_", text)
+    return text.strip("_")
+
+
 def child_key(name: str) -> str:
     """Stable dict key for a folder name inside parsed YAML structures."""
     return _norm(name).replace(" ", "_")
@@ -250,19 +312,22 @@ def default_taxonomy(exact_spelling: bool = False) -> Taxonomy:
 
 def _parse_folder_spec(
     spec: object,
-) -> tuple[list[str], dict[str, list[str]], dict[str, list[str]]]:
-    """Parse a folder mapping into (children, child keywords, grandchildren)."""
+) -> tuple[list[str], dict[str, list[str]], dict[str, list[str]], set[str]]:
+    """Parse a folder mapping into (children, child keywords, grandchildren,
+    dynamic children — folders marked 'dynamic: true' that accept a free
+    final component, e.g. Bills/<vendor>)."""
     children: list[str] = []
     child_keywords: dict[str, list[str]] = {}
     grandchildren: dict[str, list[str]] = {}
+    dynamic: set[str] = set()
 
     if spec is None:
-        return children, child_keywords, grandchildren
+        return children, child_keywords, grandchildren, dynamic
 
     if isinstance(spec, list):
         for item in spec:
             children.append(str(item))
-        return children, child_keywords, grandchildren
+        return children, child_keywords, grandchildren, dynamic
 
     if not isinstance(spec, dict):
         raise ValueError(f"Invalid folder spec: {spec!r}")
@@ -280,6 +345,8 @@ def _parse_folder_spec(
             keywords = child_spec.get("keywords") or []
             if keywords:
                 child_keywords[child_key(child_name)] = [str(k) for k in keywords]
+            if child_spec.get("dynamic"):
+                dynamic.add(child_key(child_name))
             subs = child_spec.get("subfolders") or []
             if isinstance(subs, dict):
                 # Mapping form: {Grandchild: {...}} — preserve declaration order.
@@ -289,7 +356,7 @@ def _parse_folder_spec(
         elif isinstance(child_spec, (list, tuple)):
             grandchildren[child_name] = [str(s) for s in child_spec]
 
-    return children, child_keywords, grandchildren
+    return children, child_keywords, grandchildren, dynamic
 
 
 def load_taxonomy(path: Path | str) -> Taxonomy:
@@ -320,6 +387,7 @@ def load_taxonomy(path: Path | str) -> Taxonomy:
     grandchildren: dict[str, dict[str, list[str]]] = {}
     root_keywords: dict[str, list[str]] = {}
     roles: dict[str, str] = {}
+    dynamic_children: dict[str, set[str]] = {}
 
     for root_name, root_spec in roots_spec.items():
         root = str(root_name)
@@ -336,12 +404,14 @@ def load_taxonomy(path: Path | str) -> Taxonomy:
                 folder_spec = {k: v for k, v in folder_spec.items() if k not in ("keywords", "role")}
         else:
             folder_spec = root_spec
-        kids, ck, gc = _parse_folder_spec(folder_spec)
+        kids, ck, gc, dyn = _parse_folder_spec(folder_spec)
         children[root] = kids
         if ck:
             child_keywords[root] = ck
         if gc:
             grandchildren[root] = gc
+        if dyn:
+            dynamic_children[child_key(root)] = dyn
 
     taxonomy = Taxonomy(
         roots=roots,
@@ -350,6 +420,7 @@ def load_taxonomy(path: Path | str) -> Taxonomy:
         grandchildren=grandchildren,
         root_keywords=root_keywords,
         roles=roles,
+        dynamic_children=dynamic_children,
     )
 
     person_root = data.get("person_root")
