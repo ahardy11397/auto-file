@@ -157,7 +157,7 @@ def test_watcher_debounce_waits_for_file_stability(tmp_path: Path):
         assert f.exists()
 
         with open(f, "a", encoding="utf-8") as fp:
-            fp.write("Final log entry dental medical Alpha\n")
+            fp.write("Chase bank statement closing summary for the checking account, ending balance and transaction count included for the period.\n")
 
         # Now wait for stability (debounce window + margin)
         time.sleep(1.2)
@@ -257,7 +257,7 @@ def test_watcher_on_processed_callback(tmp_path: Path):
 
     with watcher:
         f = inbox / "callback_doc.txt"
-        f.write_text("Alpha medical dental notes", encoding="utf-8")
+        f.write_text("Alpha medical and dental appointment notes from the clinic, cleaning and checkup completed, next visit scheduled in six months.", encoding="utf-8")
         time.sleep(1.2)
 
         assert not f.exists()

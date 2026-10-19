@@ -13,7 +13,7 @@ Detect → Dispatch → Extract → Understand → Route → Execute & Audit
 1. **Detect** — MIME type (magic-byte signature via `puremagic`, fallback `mimetypes`), size, timestamps, streaming SHA-256. Misnamed files (e.g. a PDF named `.txt`) and extensionless files are identified correctly.
 2. **Dispatch** — Laya decision runner (`onnxruntime` ModernBERT with deterministic heuristic fallback) picks the optimal extractor tool.
 3. **Extract** — Dedicated extractors: PDF text (`pypdf`, rendered page preview for scanned docs via `pypdfium2`), image EXIF with orientation transposition (`pillow`), bounded plain text, audio metadata tags (`mutagen`), and binary fallback.
-4. **Understand** — 4-bit quantized Gemma 4 E2B local multimodal LLM extracts content date, detected entities, category hint, and concise description slug, with calendar validation and safe heuristic fallback.
+4. **Understand** — Gemma 4 E2B-it local multimodal LLM (4-bit NF4 quantization via bitsandbytes, GPU-accelerated) extracts content date, detected entities, category hint, and concise description slug, with calendar validation and a deterministic heuristic fallback. Documents the understander cannot confidently read are left untouched in the inbox as `needs_review` instead of being renamed into a generic folder.
 5. **Route** — Keyword routing against the configured folder-structure file (a YAML taxonomy: roots, subfolders, person names), with built-in defaults when none is configured.
 6. **Execute & Audit** — Atomic move with collision handling, verified against pre-move SHA-256 and logged to a reversible SQLite ledger.
 

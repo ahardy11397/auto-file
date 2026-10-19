@@ -76,7 +76,7 @@ def test_cli_sort_directory(tmp_path: Path):
     inbox = tmp_path / "inbox"
     inbox.mkdir()
     (inbox / "file1.txt").write_text("Receipt from Target", encoding="utf-8")
-    (inbox / "file2.txt").write_text("Blood test results for Echo", encoding="utf-8")
+    (inbox / "file2.txt").write_text("Blood test results for Echo from the clinic laboratory, reviewed by the physician, follow up appointment scheduled next month.", encoding="utf-8")
 
     dest_dir = tmp_path / "sorted"
     audit_db = tmp_path / "audit.db"
@@ -184,7 +184,7 @@ def test_cli_undo_last_run(tmp_path: Path):
     audit_db = tmp_path / "audit.db"
     dest_dir = tmp_path / "sorted"
     f = tmp_path / "vehicle_registration.txt"
-    f.write_text("Vehicle registration document for Honda Civic", encoding="utf-8")
+    f.write_text("Vehicle registration document for Honda Civic, VIN 1HGCM82633A004352, registered owner Alpha Hardy, issued by the department of motor vehicles and valid through the end of next year, keep in the vehicle at all times.", encoding="utf-8")
 
     # Live sort
     sort_res = runner.invoke(
@@ -329,7 +329,7 @@ def test_cli_history_with_run_id(tmp_path: Path):
     audit_db = tmp_path / "audit.db"
     dest_dir = tmp_path / "sorted"
     f = tmp_path / "lease.txt"
-    f.write_text("Apartment rental lease agreement", encoding="utf-8")
+    f.write_text("Apartment rental lease agreement for the unit at 42 Elm Street, twelve month term beginning this month, rent due on the first, signed by both tenant and landlord.", encoding="utf-8")
 
     sort_res = runner.invoke(
         app,

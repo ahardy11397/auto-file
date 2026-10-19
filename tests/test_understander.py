@@ -327,6 +327,7 @@ def test_understanding_result_to_dict():
         "detected_entities": ["IRS"],
         "category_hint": "Tax Document",
         "summary": "Tax document",
+        "understood": True,
     }
 
 
@@ -481,3 +482,67 @@ def test_understander_model_loading_passes_local_files_only():
             device_map="cpu",
             torch_dtype=mock_torch.float32,
         )
+
+
+# ==============================================================================
+# Understanding Confidence Gate Tests
+# ==============================================================================
+
+
+def _content(text: str = "", **hints) -> ExtractedContent:
+    return ExtractedContent(
+        text_content=text,
+        image_content=None,
+        metadata_hints=dict(hints),
+        exif_date=None,
+    )
+
+
+def test_deterministic_scan_without_text_is_not_understood():
+    """A scan with no extractable text cannot be understood."""
+    u = GemmaUnderstander(mock=True)
+    result = u.understand(_content(), filename_hint="unknown_scan.pdf")
+    assert result.understood is False
+    assert result.category_hint == "Document"
+
+
+def test_deterministic_specific_category_is_understood():
+    u = GemmaUnderstander(mock=True)
+    text = "Your electric bill for September is now available. Amount due: $84.12 by October 3rd."
+    result = u.understand(_content(text), filename_hint="bill.pdf")
+    assert result.understood is True
+    assert result.category_hint == "Bill"
+
+
+def test_deterministic_rich_generic_text_is_understood():
+    """Readable text with no keyword category still counts as understood —
+    the summary is real content, not a guess."""
+    u = GemmaUnderstander(mock=True)
+    text = (
+        "Dear customer, thank you for your continued membership with our "
+        "warehouse club. This letter confirms your annual renewal was "
+        "processed successfully and your membership card remains active. "
+        "Please contact member services with any questions about your account."
+    )
+    result = u.understand(_content(text), filename_hint="letter.pdf")
+    assert result.understood is True
+    assert result.summary.startswith("Dear customer")
+
+
+def test_neural_empty_output_is_not_understood():
+    """The model running but returning nothing means it did not understand."""
+    u = GemmaUnderstander()
+    u._model = MagicMock()
+    u._processor = MagicMock()
+    u._is_loaded = True
+
+    proc_result = MagicMock()
+    proc_result.input_ids.shape = (1, 10)
+    u._processor.return_value = proc_result
+    model_out = MagicMock()
+    model_out.__getitem__ = lambda self, idx: MagicMock()
+    u._model.generate.return_value = [MagicMock()]
+    u._processor.decode.return_value = "..."
+
+    result = u.understand(_content("some text"), filename_hint="mystery.pdf")
+    assert result.understood is False

@@ -150,6 +150,54 @@ class FilePipelineExecutor:
             # 4. Multimodal semantic understanding
             understanding = self.understander.understand(extracted, filename_hint=orig_path.name)
 
+            # 4.5 Understanding gate: when the understander could not
+            # confidently read the document (a scan with no text, no known
+            # owner, nothing recognizable), leave it untouched in the inbox
+            # for manual review instead of renaming it into a generic folder.
+            if not getattr(understanding, "understood", True):
+                gate_details: dict[str, Any] = {
+                    "mime_type": metadata.mime_type,
+                    "sha256": metadata.sha256,
+                    "tool_selected": tool_name,
+                    "date_value": metadata.mtime.strftime("%Y-%m-%d"),
+                    "reason": "insufficient_understanding",
+                }
+                if not dry_run and self.audit_ledger is not None:
+                    active_run_id = run_id
+                    need_finish = False
+                    if active_run_id is None:
+                        active_run_id = self.audit_ledger.start_run(
+                            mode="cli_single",
+                            source_root=orig_path,
+                            target_root=self.target_root,
+                        )
+                        need_finish = True
+                    event_id = self.audit_ledger.record_event(
+                        run_id=active_run_id,
+                        original_path=orig_path,
+                        destination_path=orig_path,
+                        sha256=metadata.sha256,
+                        file_size=metadata.size_bytes,
+                        date_source="none",
+                        date_value="",
+                        description="needs_review",
+                        laya_tool_selected=tool_name,
+                        laya_category_selected="",
+                        status="needs_review",
+                    )
+                    gate_details["audit_event_id"] = event_id
+                    gate_details["audit_run_id"] = active_run_id
+                    if need_finish:
+                        self.audit_ledger.finish_run(active_run_id)
+
+                return PipelineResult(
+                    status="needs_review",
+                    original_path=orig_path,
+                    destination_path=orig_path,
+                    proposed_relative_path=Path("_needs_review") / orig_path.name,
+                    details=gate_details,
+                )
+
             # 5. Taxonomy destination routing
             relative_folder = self.router.resolve_destination(
                 entities=understanding.detected_entities,

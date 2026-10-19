@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 import json
 import logging
+import os
 from pathlib import Path
 import re
 from typing import Any
@@ -84,6 +85,7 @@ class UnderstandingResult:
     detected_entities: list[str] = field(default_factory=list)
     category_hint: str = ""
     summary: str = ""
+    understood: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         """Convert result to a standard dictionary."""
@@ -291,6 +293,10 @@ def _extract_category_hint_from_text(text: str) -> str:
             "prescription",
             "rx",
             "pediatric",
+            "checkup",
+            "appointment",
+            "dental",
+            "dentist",
             "diagnosis",
             "immunization",
             "vaccination",
@@ -511,7 +517,7 @@ class GemmaUnderstander:
     def __init__(
         self,
         model_id: str = "google/gemma-4-E2B-it",
-        mock: bool = False,
+        mock: bool | None = None,
         device: str = "auto",
         mock_response: Any = None,
         mock_handler: Any = None,
@@ -520,7 +526,10 @@ class GemmaUnderstander:
 
         Args:
             model_id: Hugging Face model identifier (default: google/gemma-4-E2B-it).
-            mock: If True, uses deterministic offline extraction without loading weights.
+            mock: If True, uses deterministic offline extraction without loading
+                weights. If None (default), AUTO_FILE_UNDERSTANDER=mock forces
+                deterministic mode (used by the test suite); otherwise the real
+                model loads.
             device: Target device mapping ('auto', 'cuda', 'cpu').
             mock_response: Optional fixed response (UnderstandingResult, string, or callable).
             mock_handler: Optional custom callback for mock execution.
@@ -530,6 +539,12 @@ class GemmaUnderstander:
         self.device = device
         self.mock_response = mock_response
         self.mock_handler = mock_handler
+
+        # Test hook: AUTO_FILE_UNDERSTANDER=mock forces deterministic mode so
+        # the test suite never attempts a real model download or GPU load.
+        # An explicit mock=False always takes the real path.
+        if self.mock is None and os.environ.get("AUTO_FILE_UNDERSTANDER", "").strip().lower() == "mock":
+            self.mock = True
 
         self._model: Any = None
         self._processor: Any = None
@@ -673,6 +688,18 @@ class GemmaUnderstander:
 
             result = parse_llm_json_response(raw_output)
 
+            # The model ran but understood nothing (empty or garbage output
+            # that even the fallback parser got nothing from): flag for
+            # review instead of renaming the file into a generic folder.
+            raw_clean = raw_output.strip()
+            generic_result = (
+                result.category_hint in {"", "Document"}
+                and result.file_description in {"", "document"}
+                and len(result.summary.strip()) < 15
+            )
+            if not raw_clean or len(raw_clean) < 20 or generic_result:
+                result.understood = False
+
             # Fall back to EXIF date if LLM missed date
             if result.content_date is None and content.exif_date:
                 result.content_date = normalize_date_string(content.exif_date)
@@ -807,10 +834,23 @@ class GemmaUnderstander:
         elif category_hint == "Photo":
             summary = "Image or photograph"
         elif text:
-            first_line = text.splitlines()[0].strip()
-            summary = first_line[:200]
+            text_lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            summary = " ".join(text_lines[:3])[:240]
         else:
             summary = f"{category_hint} file"
+
+        # 6. Understanding confidence: only claim understanding when there is
+        # real evidence — a specific category derived from content, or enough
+        # readable text. Scans with no extractable text and unidentifiable
+        # documents are flagged so the pipeline leaves them untouched.
+        text_words = len(text.split())
+        text_ok = text_words >= 25 and len(text) >= 120
+        specific_hint = category_hint not in {"", "Document", "Photo", "Audio"}
+        photo_ok = category_hint == "Photo" and bool(content.exif_date)
+        audio_ok = category_hint == "Audio" and bool(
+            content.metadata_hints.get("title") or content.metadata_hints.get("artist")
+        )
+        understood = specific_hint or text_ok or photo_ok or audio_ok
 
         return UnderstandingResult(
             content_date=content_date,
@@ -818,6 +858,7 @@ class GemmaUnderstander:
             detected_entities=entities,
             category_hint=category_hint,
             summary=summary,
+            understood=understood,
         )
 
 

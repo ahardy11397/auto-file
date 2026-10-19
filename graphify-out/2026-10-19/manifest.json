@@ -156,9 +156,9 @@
     "semantic_hash": ""
   },
   "src/auto_file/core/router.py": {
-    "mtime": 1792432185.0393317,
-    "seen": 1792432441.1897078,
-    "ast_hash": "1cb2b77755462e85a9f5654fae55fc37",
+    "mtime": 1792433116.406578,
+    "seen": 1792433366.4729123,
+    "ast_hash": "81e2b614d40554a98d03609bbe6fd1da",
     "semantic_hash": ""
   },
   "src/auto_file/core/understander.py": {
@@ -222,15 +222,15 @@
     "semantic_hash": ""
   },
   "src/auto_file/core/taxonomy.py": {
-    "mtime": 1792374252.6154315,
-    "seen": 1792432441.1897097,
-    "ast_hash": "701751b25b69bb45a17322c6ff5d95bf",
+    "mtime": 1792432871.9082897,
+    "seen": 1792433366.4729145,
+    "ast_hash": "649e46afd40520be6fb28484af30f6a7",
     "semantic_hash": ""
   },
   "tests/test_taxonomy.py": {
-    "mtime": 1792432398.2626228,
-    "seen": 1792432441.1897352,
-    "ast_hash": "adba28169c9269d6579494bcef2027bc",
+    "mtime": 1792432915.1953428,
+    "seen": 1792433366.4729404,
+    "ast_hash": "5445e7a770fbd74591df61b94b501415",
     "semantic_hash": ""
   },
   "docs/superpowers/specs/2026-10-18-config-driven-taxonomy-design.md": {

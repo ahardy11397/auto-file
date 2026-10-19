@@ -179,7 +179,12 @@ def test_pipeline_date_precedence_filesystem_fallback(tmp_path: Path):
     target_dir.mkdir()
 
     test_file = source_dir / "misc_notes.txt"
-    test_file.write_text("Random notes without any date here.", encoding="utf-8")
+    test_file.write_text(
+        "Random notes about the garden project without any date. The tomatoes "
+        "are growing well this season and we should plan the fall cleanup "
+        "before the first frost arrives next month.",
+        encoding="utf-8",
+    )
 
     executor = FilePipelineExecutor(target_root=target_dir)
     result = executor.process_file(test_file, dry_run=True)
@@ -456,3 +461,67 @@ def test_pipeline_post_move_verification_failure_records_target_path(tmp_path: P
     assert events[0]["status"] == "failed"
     assert events[0]["destination_path"] == str(res.destination_path)
     assert events[0]["original_path"] == str(test_file)
+
+
+# ==============================================================================
+# Understanding Gate Tests (needs_review)
+# ==============================================================================
+
+
+def test_pipeline_needs_review_leaves_unreadable_file_in_inbox(tmp_path: Path):
+    """A file the understander cannot confidently read stays untouched."""
+    source_dir = tmp_path / "inbox"
+    source_dir.mkdir()
+    target_dir = tmp_path / "sorted"
+    target_dir.mkdir()
+
+    test_file = source_dir / "unknown_scan.txt"
+    test_file.write_text("hi", encoding="utf-8")  # too little content to understand
+
+    ledger = AuditLedger(tmp_path / "audit.db")
+    executor = FilePipelineExecutor(target_root=target_dir, audit_ledger=ledger)
+
+    result = executor.process_file(test_file, dry_run=False)
+    assert result.status == "needs_review"
+    assert test_file.exists()  # NOT moved, NOT renamed
+    assert result.destination_path == test_file
+
+    # The ledger records the needs_review event
+    events = ledger.get_recent_events(limit=5)
+    assert any(e["status"] == "needs_review" and e["original_path"] == str(test_file) for e in events)
+
+
+def test_pipeline_dry_run_reports_needs_review(tmp_path: Path):
+    source_dir = tmp_path / "inbox"
+    source_dir.mkdir()
+    target_dir = tmp_path / "sorted"
+    target_dir.mkdir()
+
+    test_file = source_dir / "scan.txt"
+    test_file.write_text("hi", encoding="utf-8")
+
+    executor = FilePipelineExecutor(target_root=target_dir)
+    result = executor.process_file(test_file, dry_run=True)
+    assert result.status == "needs_review"
+    assert test_file.exists()
+
+
+def test_pipeline_moves_when_understanding_is_specific(tmp_path: Path):
+    """Specific category from real content passes the gate."""
+    source_dir = tmp_path / "inbox"
+    source_dir.mkdir()
+    target_dir = tmp_path / "sorted"
+    target_dir.mkdir()
+
+    test_file = source_dir / "unknown_scan.txt"
+    test_file.write_text(
+        "Utility bill from City Power Company. Account 55201. "
+        "Service address 12 Oak Street. Billing period September. "
+        "Amount due $96.40, payment due by October 15th.",
+        encoding="utf-8",
+    )
+
+    executor = FilePipelineExecutor(target_root=target_dir)
+    result = executor.process_file(test_file, dry_run=False)
+    assert result.status == "moved"
+    assert not test_file.exists()

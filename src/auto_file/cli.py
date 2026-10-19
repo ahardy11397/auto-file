@@ -171,6 +171,8 @@ def sort(
             status_style = "[yellow]preview[/yellow]"
         elif status_lower == "duplicate_skipped":
             status_style = "[cyan]duplicate_skipped[/cyan]"
+        elif status_lower == "needs_review":
+            status_style = "[magenta]needs_review[/magenta]"
         elif status_lower == "failed":
             status_style = "[red]failed[/red]"
         else:
@@ -192,6 +194,7 @@ def sort(
     moved_count = sum(1 for r in results if r.status == "moved")
     preview_count = sum(1 for r in results if r.status == "preview")
     skipped_count = sum(1 for r in results if r.status == "duplicate_skipped")
+    review_count = sum(1 for r in results if r.status == "needs_review")
     failed_count = sum(1 for r in results if r.status == "failed")
 
     summary_parts = []
@@ -201,6 +204,8 @@ def sort(
         summary_parts.append(f"{preview_count} previewed")
     if skipped_count:
         summary_parts.append(f"{skipped_count} duplicate skipped")
+    if review_count:
+        summary_parts.append(f"{review_count} left for review")
     if failed_count:
         summary_parts.append(f"{failed_count} failed")
 
@@ -329,6 +334,8 @@ def history(
             status_style = "[yellow]rolled_back[/yellow]"
         elif status_lower == "duplicate_skipped":
             status_style = "[cyan]duplicate_skipped[/cyan]"
+        elif status_lower == "needs_review":
+            status_style = "[magenta]needs_review[/magenta]"
         elif status_lower == "failed":
             status_style = "[red]failed[/red]"
         else:
@@ -600,6 +607,8 @@ def watch(
             status_style = "[green]moved[/green]"
         elif status_lower == "duplicate_skipped":
             status_style = "[cyan]duplicate_skipped[/cyan]"
+        elif status_lower == "needs_review":
+            status_style = "[magenta]needs_review — left in inbox[/magenta]"
         elif status_lower == "failed":
             status_style = "[red]failed[/red]"
         else:
