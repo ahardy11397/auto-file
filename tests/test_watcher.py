@@ -317,6 +317,37 @@ def test_cli_watch_clean_interrupt(tmp_path: Path):
     assert "Watcher stopped cleanly" in result.output
 
 
+def test_watcher_processes_files_when_inbox_inside_target_root(tmp_path: Path):
+    """Regression: with inbox nested inside the destination root (e.g.
+    Cabinet/Inbox with dest=Cabinet), inbox files must still be processed
+    while already-sorted areas of the destination stay untouched."""
+    dest = tmp_path / "cabinet"
+    dest.mkdir()
+    inbox = dest / "Inbox"
+    inbox.mkdir()
+    # An already-sorted area of the destination, outside the inbox
+    (dest / "Financial").mkdir()
+
+    ledger = AuditLedger(tmp_path / "audit.db")
+    executor = FilePipelineExecutor(target_root=dest, audit_ledger=ledger)
+    watcher = FolderWatcher(inbox_dir=inbox, executor=executor, debounce_seconds=0.3)
+
+    # Already-sorted areas are ignored...
+    assert watcher.is_ignored(dest / "Financial" / "sorted.txt")
+    # ...but incoming inbox files are not
+    assert not watcher.is_ignored(inbox / "new_file.txt")
+
+    watcher.start()
+    try:
+        incoming = inbox / "storage receipt.txt"
+        incoming.write_text("storage unit rental receipt paid in full", encoding="utf-8")
+        time.sleep(1.2)
+        assert not incoming.exists()
+        assert any("receipt" in p.name.lower() for p in dest.rglob("*.txt") if "Inbox" not in p.parts)
+    finally:
+        watcher.stop()
+
+
 def test_watcher_boundary_checks_and_nested_target_root(tmp_path: Path):
     """Verify watcher ignores files outside inbox and ignores files inside nested target_root."""
     inbox = tmp_path / "inbox"

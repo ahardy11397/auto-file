@@ -103,6 +103,17 @@ class FolderWatcher:
         """Return True if watcher is actively running."""
         return self._is_running and self._observer is not None and self._observer.is_alive()
 
+    def _in_sorted_area(self, path: Path, target_root_resolved: Path) -> bool:
+        """True when a path sits in an already-sorted area of the destination tree.
+
+        Handles both layouts: destination nested inside the inbox (ignore
+        everything under the destination), and inbox nested inside the
+        destination (ignore destination areas outside the inbox).
+        """
+        if target_root_resolved.is_relative_to(self.inbox_dir):
+            return path.is_relative_to(target_root_resolved)
+        return path.is_relative_to(target_root_resolved) and not path.is_relative_to(self.inbox_dir)
+
     def is_ignored(self, path: Path) -> bool:
         """Check whether a path should be ignored (hidden file or temporary extension)."""
         # 1. Ignored extensions
@@ -118,11 +129,13 @@ class FolderWatcher:
             if any(part.startswith(".") for part in path.parts):
                 return True
 
-        # 3. Inside executor target_root (prevent loop when target_root is inside inbox_dir)
+        # 3. Inside executor target_root (prevent re-sorting loop). The inbox
+        #    may legitimately live inside the destination root (Cabinet/Inbox);
+        #    only already-sorted areas are ignored — see _in_sorted_area.
         if hasattr(self.executor, "target_root"):
             try:
                 target_root_resolved = Path(self.executor.target_root).resolve()
-                if path.is_relative_to(target_root_resolved):
+                if self._in_sorted_area(path, target_root_resolved):
                     return True
             except (OSError, ValueError):
                 pass
@@ -139,15 +152,6 @@ class FolderWatcher:
         # Boundary check: ensure path is inside inbox_dir
         if not resolved_path.is_relative_to(self.inbox_dir):
             return
-
-        # If target_root is inside inbox_dir, ignore files inside it
-        if hasattr(self.executor, "target_root"):
-            try:
-                target_root_resolved = Path(self.executor.target_root).resolve()
-                if resolved_path.is_relative_to(target_root_resolved):
-                    return
-            except (OSError, ValueError):
-                pass
 
         if self.is_ignored(resolved_path):
             return
