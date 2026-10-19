@@ -14,7 +14,7 @@ Detect → Dispatch → Extract → Understand → Route → Execute & Audit
 2. **Dispatch** — Laya decision runner (`onnxruntime` ModernBERT with deterministic heuristic fallback) picks the optimal extractor tool.
 3. **Extract** — Dedicated extractors: PDF text (`pypdf`, rendered page preview for scanned docs via `pypdfium2`), image EXIF with orientation transposition (`pillow`), bounded plain text, audio metadata tags (`mutagen`), and binary fallback.
 4. **Understand** — 4-bit quantized Gemma 4 E2B local multimodal LLM extracts content date, detected entities, category hint, and concise description slug, with calendar validation and safe heuristic fallback.
-5. **Route** — Hierarchical taxonomy matching against `FOLDER_STRUCTURE.md` (People / Financial / Legal / Property / Manuals / Misc).
+5. **Route** — Keyword routing against the configured folder-structure file (a YAML taxonomy: roots, subfolders, person names), with built-in defaults when none is configured.
 6. **Execute & Audit** — Atomic move with collision handling, verified against pre-move SHA-256 and logged to a reversible SQLite ledger.
 
 ### Naming
@@ -143,9 +143,36 @@ src/auto_file/
     └── audit.py           # SQLite audit ledger + rollback engine
 ```
 
+## Running the watcher continuously
+
+The inbox watcher is meant to run as a long-lived service. On machines
+with systemd user services, install a unit like:
+
+```ini
+# ~/.config/systemd/user/auto-file-watch.service
+[Unit]
+Description=Auto-File inbox watcher
+After=local-fs.target
+
+[Service]
+ExecStart=%h/projects/auto-file/.venv/bin/auto-file watch
+WorkingDirectory=%h/projects/auto-file
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+Then: `systemctl --user daemon-reload && systemctl --user enable --now auto-file-watch.service`
+(plus `loginctl enable-linger` so it runs without an active desktop session).
+The watcher reads the same config (inbox, destination, structure file) as
+`sort`, and safely ignores already-sorted areas of the destination —
+including when the inbox itself lives inside the destination root.
+
 ## Design docs
 
-- `docs/superpowers/specs/2026-10-09-auto-file-system-design.md` — full design specification
+- `docs/superpowers/specs/2026-10-09-auto-file-system-design.md` — original full design specification
+- `docs/superpowers/specs/2026-10-18-config-driven-taxonomy-design.md` — config-driven folder structure (current routing behavior)
 - `docs/superpowers/plans/2026-10-12-auto-file-system.md` — task-by-task implementation plan
-- `FOLDER_STRUCTURE.md` — the target folder taxonomy
 - `IDEA.md` — the original idea

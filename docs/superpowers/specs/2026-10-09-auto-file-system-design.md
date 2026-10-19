@@ -4,6 +4,12 @@
 - **Status:** Approved (Ready for Implementation Planning)
 - **Target Repository:** `/mnt/ssd/projects/auto-file`
 
+> **Note (2026-10-18):** Routing described here as hardcoded against
+> `FOLDER_STRUCTURE.md` is now config-driven — see
+> `2026-10-18-config-driven-taxonomy-design.md` for the current folder
+> taxonomy, setup wizard, and watcher behavior. This document is kept as
+> the original design record.
+
 ---
 
 ## 1. Executive Summary & Purpose

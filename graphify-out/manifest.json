@@ -144,10 +144,10 @@
     "semantic_hash": "f0ef97d3ff141a74ccec6f3746cc63d9"
   },
   "docs/superpowers/specs/2026-10-09-auto-file-system-design.md": {
-    "mtime": 1791824934.4935014,
-    "seen": 1791842381.2752967,
-    "ast_hash": "8d28c5581d50e1c5ae31efc7c9de2904",
-    "semantic_hash": "8d28c5581d50e1c5ae31efc7c9de2904"
+    "mtime": 1792372727.0230694,
+    "seen": 1792372742.947569,
+    "ast_hash": "efd29ba0a94b8738e371d0225dee3c0b",
+    "semantic_hash": ""
   },
   "src/auto_file/core/dispatcher.py": {
     "mtime": 1792006150.3544023,
@@ -156,9 +156,9 @@
     "semantic_hash": ""
   },
   "src/auto_file/core/router.py": {
-    "mtime": 1792371740.7709913,
-    "seen": 1792372048.0307856,
-    "ast_hash": "81d451a1e4c7dc7001b5ec910fba1fdf",
+    "mtime": 1792372517.7837324,
+    "seen": 1792372742.947504,
+    "ast_hash": "b4eaf5a2e3d6164f4051ec2703ad56ea",
     "semantic_hash": ""
   },
   "src/auto_file/core/understander.py": {
@@ -174,9 +174,9 @@
     "semantic_hash": ""
   },
   "README.md": {
-    "mtime": 1792371074.607734,
-    "seen": 1792371098.1450205,
-    "ast_hash": "aad59e76b5edc65c95224f05d393a7fb",
+    "mtime": 1792372684.1260052,
+    "seen": 1792372742.9475634,
+    "ast_hash": "a445dc8a171d598dca457c79d0a6034f",
     "semantic_hash": ""
   },
   "src/auto_file/core/executor.py": {
@@ -231,6 +231,12 @@
     "mtime": 1792371556.9764366,
     "seen": 1792372048.030813,
     "ast_hash": "3e24e8d361d9b8442f5792b0e6695f66",
+    "semantic_hash": ""
+  },
+  "docs/superpowers/specs/2026-10-18-config-driven-taxonomy-design.md": {
+    "mtime": 1792372715.7745888,
+    "seen": 1792372742.9475718,
+    "ast_hash": "05b1470be0fb10179a02309003b9b720",
     "semantic_hash": ""
   }
 }
