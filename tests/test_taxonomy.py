@@ -197,6 +197,57 @@ def test_router_default_insurance_falls_back_gracefully():
     assert result.parts[0] == "Financial"
 
 
+def test_router_person_from_filename(tmp_path):
+    """Filenames carry the owner's name with underscores; routing must use it."""
+    router = TaxonomyRouter()
+    result = router.resolve_destination(
+        summary="resume with work history",
+        category_hint="Document",
+        filename_hint="Alpha_Hardy_Resume.pdf",
+    )
+    assert result == Path("People/Alpha/Documents")
+
+
+def test_router_no_false_person_from_partial_name():
+    """'Edie' must not match inside 'edible'."""
+    router = TaxonomyRouter()
+    assert (
+        router.resolve_destination(summary="grocery list", filename_hint="edible_plants.pdf")
+        == Path("Misc")
+    )
+
+
+def test_heuristic_medical_requires_specific_terms():
+    """Bare 'medical' (e.g. a resume mentioning a medical office) is not a
+    medical record; patient/clinic/prescription are."""
+    from auto_file.core.understander import _extract_category_hint_from_text
+
+    assert _extract_category_hint_from_text("Worked at a medical office front desk") == "Document"
+    assert _extract_category_hint_from_text("Patient diagnosis summary from clinic") == "Medical Record"
+
+
+def test_heuristic_resume_outranks_medical():
+    """A resume mentioning patient care must be a Resume, not a medical record."""
+    from auto_file.core.understander import _extract_category_hint_from_text
+
+    text = (
+        "Aaron Hardy Resume\n"
+        "Work experience: medical assistant at Lakeside Clinic, "
+        "patient scheduling and vitals"
+    )
+    assert _extract_category_hint_from_text(text) == "Resume"
+
+
+def test_router_resume_goes_to_documents_not_medical():
+    router = TaxonomyRouter()
+    result = router.resolve_destination(
+        summary="resume with patient care experience",
+        category_hint="Resume",
+        filename_hint="Alpha_Hardy_Resume.pdf",
+    )
+    assert result == Path("People/Alpha/Documents")
+
+
 def test_router_default_taxonomy_unchanged_behavior():
     router = TaxonomyRouter()
     assert router.resolve_destination(entities=["Alpha"], category_hint="medical") == Path("People/Alpha/Medical")

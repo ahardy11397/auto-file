@@ -324,6 +324,7 @@ class TaxonomyRouter:
         category_hint: str | None = None,
         summary: str | None = None,
         model_path: Path | str | None = None,
+        filename_hint: str | None = None,
     ) -> Path:
         """Resolve destination path relative to target root.
 
@@ -332,6 +333,8 @@ class TaxonomyRouter:
             category_hint: Optional category classification hint from LLM.
             summary: Optional short content summary.
             model_path: Optional path to Laya ONNX decision model weights.
+            filename_hint: Optional original filename — person names are often
+                only present there (e.g. 'Aaron_Hardy_Resume.pdf').
 
         Returns:
             Relative Path object representing target folder (e.g. Path('People/Alpha/Medical')).
@@ -352,6 +355,7 @@ class TaxonomyRouter:
             hint=hint,
             summary=text_summary,
             onnx_root=onnx_root,
+            filename_hint=filename_hint,
         )
 
     def route_destination(
@@ -419,8 +423,14 @@ class TaxonomyRouter:
             logger.debug("ONNX taxonomy inference failed, falling back: %s", exc)
             return None
 
-    def _find_person(self, entities: list[str], hint: str, summary: str) -> str | None:
-        """Find a canonical person name matching entities, summary, or hint."""
+    def _find_person(
+        self,
+        entities: list[str],
+        hint: str,
+        summary: str,
+        filename_hint: str | None = None,
+    ) -> str | None:
+        """Find a canonical person name matching entities, summary, hint, or filename."""
         people = self.taxonomy.people
         if not people:
             return None
@@ -438,6 +448,16 @@ class TaxonomyRouter:
             pattern = rf"\b{re.escape(person.lower())}\b"
             if re.search(pattern, combined_text):
                 return person
+
+        # 3. Filenames often carry the owner ('Aaron_Hardy_Resume.pdf') with
+        #    underscores/periods instead of spaces, so match name against
+        #    separator boundaries rather than word boundaries.
+        if filename_hint:
+            filename_lower = filename_hint.lower()
+            for person in people:
+                pattern = rf"(?:^|[_\W]){re.escape(person.lower())}(?:$|[_\W])"
+                if re.search(pattern, filename_lower):
+                    return person
 
         return None
 
@@ -469,13 +489,14 @@ class TaxonomyRouter:
         hint: str,
         summary: str,
         onnx_root: str | None = None,
+        filename_hint: str | None = None,
     ) -> Path:
         """Execute hierarchical deterministic branch resolution."""
         hint_lower = hint.lower()
         summary_lower = summary.lower()
         combined = f"{hint_lower} {summary_lower}"
 
-        person = self._find_person(entities, hint, summary)
+        person = self._find_person(entities, hint, summary, filename_hint)
         person_root = self.taxonomy.person_root
 
         # Check if root is explicitly constrained to non-People by hints

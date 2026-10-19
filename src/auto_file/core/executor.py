@@ -155,6 +155,7 @@ class FilePipelineExecutor:
                 entities=understanding.detected_entities,
                 category_hint=understanding.category_hint,
                 summary=understanding.summary,
+                filename_hint=orig_path.name,
             )
 
             # 6. Date precedence: content date if present, fallback to filesystem mtime YYYY-MM-DD

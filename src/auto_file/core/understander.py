@@ -248,6 +248,8 @@ def _extract_entities_from_text(text: str) -> list[str]:
 def _extract_category_hint_from_text(text: str) -> str:
     """Infer category hint from text keywords."""
     tl = text.lower()
+    if any(k in tl for k in ["resume", "curriculum vitae", "work experience", "professional experience"]):
+        return "Resume"
     if (
         any(k in tl for k in ["bank statement", "account statement", "checking statement", "savings statement"])
         or ("statement" in tl and any(w in tl for w in ["bank", "account", "checking", "savings", "balance"]))
@@ -277,10 +279,11 @@ def _extract_category_hint_from_text(text: str) -> str:
     if any(
         k in tl
         for k in [
-            "medical",
+            "medical record",
+            "medical history",
+            "patient",
             "clinic",
             "hospital",
-            "patient",
             "doctor",
             "dr.",
             "dr ",
@@ -288,6 +291,9 @@ def _extract_category_hint_from_text(text: str) -> str:
             "prescription",
             "rx",
             "pediatric",
+            "diagnosis",
+            "immunization",
+            "vaccination",
         ]
     ):
         return "Medical Record"
@@ -760,11 +766,15 @@ class GemmaUnderstander:
             else:
                 desc_parts.append("medical_record")
         elif category_hint == "Receipt":
-            store = entities[0] if entities else "receipt"
-            desc_parts.append(f"receipt_{store}")
+            if entities:
+                desc_parts.append(f"receipt_{entities[0]}")
+            else:
+                desc_parts.append("receipt")
         elif category_hint == "Bill":
-            provider = entities[0] if entities else "bill"
-            desc_parts.append(f"bill_{provider}")
+            if entities:
+                desc_parts.append(f"bill_{entities[0]}")
+            else:
+                desc_parts.append("bill")
         elif category_hint == "Photo":
             if filename_hint:
                 desc_parts.append(Path(filename_hint).stem)
