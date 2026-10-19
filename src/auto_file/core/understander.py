@@ -7,6 +7,10 @@ from datetime import date, datetime
 import json
 import logging
 import os
+import subprocess
+import threading
+import time
+import urllib.request
 from pathlib import Path
 import re
 from typing import Any
@@ -511,6 +515,210 @@ def _load_transformer_model(
         return model, processor
 
 
+class LlamaServerManager:
+    """On-demand llama.cpp server lifecycle for the packaged Gemma model.
+
+    Starts ``llama-server`` bound to localhost only when a document needs
+    understanding, and shuts it down after an idle timeout — so there is no
+    standing network service. Single-flight by design (the watcher processes
+    one file at a time).
+    """
+
+    def __init__(
+        self,
+        binary: str,
+        model: str,
+        mmproj: str | None = None,
+        port: int = 8082,
+        idle_seconds: int = 300,
+        start_timeout: int = 900,
+    ) -> None:
+        self.binary = str(Path(binary).expanduser())
+        self.model = str(Path(model).expanduser())
+        self.mmproj = str(Path(mmproj).expanduser()) if mmproj else None
+        self.port = int(port)
+        self.idle_seconds = int(idle_seconds)
+        self.start_timeout = int(start_timeout)
+        self.url = f"http://127.0.0.1:{self.port}"
+        self._proc: subprocess.Popen | None = None
+        self._idle_timer: threading.Timer | None = None
+        self._lock = threading.Lock()
+        self._in_flight = 0
+        self._pidfile = Path.home() / ".local" / "state" / "auto-file" / "llama-server.pid"
+
+    def _pidfile_pid(self) -> int | None:
+        """Return the pid of a server we previously spawned, if still alive."""
+        try:
+            pid = int(self._pidfile.read_text().strip())
+            Path(f"/proc/{pid}").resolve()  # raises if gone
+            return pid
+        except (OSError, ValueError):
+            return None
+
+    def _write_pidfile(self, pid: int) -> None:
+        try:
+            self._pidfile.parent.mkdir(parents=True, exist_ok=True)
+            self._pidfile.write_text(str(pid))
+        except OSError:
+            pass
+
+    def _clear_pidfile(self) -> None:
+        try:
+            self._pidfile.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def _kill_stale_orphan(self) -> None:
+        """Kill a leftover llama-server we spawned earlier (tracked by pidfile)."""
+        pid = self._pidfile_pid()
+        if pid is not None:
+            logger.warning("Killing stale llama-server orphan (pid %s)", pid)
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+            self._clear_pidfile()
+            time.sleep(1)
+
+    def _healthy(self) -> bool:
+        try:
+            with urllib.request.urlopen(f"{self.url}/health", timeout=3) as resp:
+                return b"ok" in resp.read()
+        except Exception:
+            return False
+
+    def ensure_running(self) -> bool:
+        """Make sure the server is up; spawn it if needed. True when healthy."""
+        with self._lock:
+            if self._healthy():
+                # Adopt a server we previously spawned (tracked by pidfile)
+                # so its idle shutdown can still stop it later.
+                if self._pidfile_pid() is not None or self._proc is not None:
+                    self._reset_idle_timer()
+                    return True
+                # Healthy but untracked — we cannot manage its lifecycle
+                # safely; treat as unavailable rather than leave it standing.
+                logger.warning("Port %s is served by an untracked llama-server; not adopting", self.port)
+                return False
+
+            # A previous spawn may have outlived its manager (crash, race):
+            # adopt it if healthy, otherwise kill our own orphan before retry.
+            orphan = self._pidfile_pid()
+            if orphan is not None:
+                self._kill_stale_orphan()
+
+            self._stop_locked()
+
+            env = dict(os.environ)
+            build_bin = Path(self.binary).resolve().parent
+            env["LD_LIBRARY_PATH"] = str(build_bin) + ":" + env.get("LD_LIBRARY_PATH", "")
+            cmd = [
+                self.binary,
+                "-m", self.model,
+                "-c", "4096",
+                "--host", "127.0.0.1",
+                "--port", str(self.port),
+                "--jinja",
+                "-ngl", "0",
+            ]
+            if self.mmproj:
+                cmd += ["--mmproj", self.mmproj]
+
+            try:
+                log_path = Path.home() / ".local" / "state" / "auto-file"
+                log_path.mkdir(parents=True, exist_ok=True)
+                log_file = open(log_path / "llama-server.log", "ab")
+                self._proc = subprocess.Popen(
+                    cmd,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    env=env,
+                    start_new_session=True,
+                )
+                self._write_pidfile(self._proc.pid)
+            except OSError as exc:
+                logger.warning("Could not spawn llama-server (%s); using deterministic fallback", exc)
+                return False
+
+            deadline = time.time() + self.start_timeout
+            while True:
+                if self._proc.poll() is not None:
+                    logger.warning("llama-server exited during startup (code %s)", self._proc.returncode)
+                    self._proc = None
+                    return False
+                if self._healthy():
+                    logger.info("llama-server started on %s", self.url)
+                    self._reset_idle_timer()
+                    return True
+                # Model loads can take minutes on a busy disk; wait as long as
+                # the server process itself is alive. Hard-stop well past any
+                # reasonable load to avoid an infinite wait.
+                if time.time() > deadline and deadline > 0:
+                    logger.warning("llama-server still loading after %ss; giving up", self.start_timeout)
+                    self._stop_locked()
+                    return False
+                time.sleep(2)
+
+    def begin_request(self) -> None:
+        """Mark a request in flight so the idle shutdown cannot kill it."""
+        with self._lock:
+            self._in_flight += 1
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+                self._idle_timer = None
+
+    def end_request(self) -> None:
+        """Request finished; re-arm the idle shutdown."""
+        with self._lock:
+            self._in_flight = max(0, self._in_flight - 1)
+            self._reset_idle_timer()
+
+    def _reset_idle_timer(self) -> None:
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+        if self.idle_seconds > 0:
+            self._idle_timer = threading.Timer(self.idle_seconds, self._idle_shutdown)
+            self._idle_timer.daemon = True
+            self._idle_timer.start()
+
+    def _idle_shutdown(self) -> None:
+        with self._lock:
+            if self._in_flight > 0:
+                # A request is running; re-arm and wait for it to finish.
+                self._reset_idle_timer()
+                return
+            if self._healthy():
+                logger.info("llama-server idle for %ss; shutting down", self.idle_seconds)
+                self._stop_locked()
+
+    def _stop_locked(self) -> None:
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+        proc = self._proc
+        pid = self._pidfile_pid()
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        if proc is None and pid is not None:
+            # Spawned by a previous manager instance that died before cleanup.
+            try:
+                os.kill(pid, 15)
+                time.sleep(2)
+                os.kill(pid, 9)
+            except OSError:
+                pass
+        self._proc = None
+        self._clear_pidfile()
+
+    def shutdown(self) -> None:
+        with self._lock:
+            self._stop_locked()
+
+
 class GemmaUnderstander:
     """Multimodal document understander using Gemma 4 E2B (google/gemma-4-E2B-it).
 
@@ -528,6 +736,7 @@ class GemmaUnderstander:
         mock_response: Any = None,
         mock_handler: Any = None,
         llama_url: str | None = None,
+        llama_server: dict[str, Any] | None = None,
     ) -> None:
         """Initialize Gemma understander.
 
@@ -546,6 +755,10 @@ class GemmaUnderstander:
                 much faster than in-process transformers and supports vision for
                 scanned documents. Unreachable servers fall back to the
                 deterministic path.
+            llama_server: Optional on-demand server config dict with keys
+                'binary', 'model', 'mmproj', 'port', 'idle_seconds'. When set,
+                llama-server is spawned for the duration of a sorting batch and
+                shut down after the idle timeout — no standing network service.
         """
         self.model_id = model_id
         self.mock = mock
@@ -553,6 +766,7 @@ class GemmaUnderstander:
         self.mock_response = mock_response
         self.mock_handler = mock_handler
         self.llama_url = (llama_url or "").rstrip("/") or None
+        self._server_mgr = LlamaServerManager(**llama_server) if llama_server else None
 
         # Test hook: AUTO_FILE_UNDERSTANDER=mock forces deterministic mode so
         # the test suite never attempts a real model download or GPU load.
@@ -671,10 +885,24 @@ class GemmaUnderstander:
         if self.mock:
             return self._understand_deterministic(content, filename_hint)
 
-        # 2.5 Packaged LLM server (llama.cpp serving Gemma) — primary neural
-        # path: fast on this hardware and supports vision for scans. An
-        # unreachable server falls straight to the deterministic path rather
-        # than the very slow in-process transformers route.
+        # 2.5 Packaged Gemma via llama.cpp — primary neural path: fast on this
+        # hardware and supports vision for scans. On-demand mode spawns the
+        # server for the batch and shuts it down after idling; an external
+        # server (llama_url) is used as-is. Any failure falls straight to the
+        # deterministic path rather than the very slow in-process
+        # transformers route.
+        if self._server_mgr is not None:
+            if not self._server_mgr.ensure_running():
+                return self._understand_deterministic(content, filename_hint)
+            self._server_mgr.begin_request()
+            try:
+                result = self._understand_via_llama_server(content, filename_hint, self._server_mgr.url)
+            finally:
+                self._server_mgr.end_request()
+            if result is not None:
+                return result
+            return self._understand_deterministic(content, filename_hint)
+
         if self.llama_url:
             result = self._understand_via_llama_server(content, filename_hint)
             if result is not None:
@@ -737,6 +965,7 @@ class GemmaUnderstander:
         self,
         content: ExtractedContent,
         filename_hint: str | None = None,
+        url: str | None = None,
     ) -> UnderstandingResult | None:
         """Understand via the packaged llama.cpp OpenAI-compatible server.
 
@@ -780,7 +1009,7 @@ class GemmaUnderstander:
         ).encode("utf-8")
 
         req = urllib.request.Request(
-            f"{self.llama_url}/v1/chat/completions",
+            f"{url or self.llama_url}/v1/chat/completions",
             data=payload,
             headers={"Content-Type": "application/json"},
         )
@@ -792,7 +1021,7 @@ class GemmaUnderstander:
             # into reasoning_content, fall back to parsing that.
             raw_output = message.get("content") or message.get("reasoning_content") or ""
         except Exception as exc:
-            logger.warning("LLM server at %s unreachable or failed (%s); using deterministic fallback", self.llama_url, exc)
+            logger.warning("LLM server at %s unreachable or failed (%s); using deterministic fallback", url or self.llama_url, exc)
             return None
 
         try:

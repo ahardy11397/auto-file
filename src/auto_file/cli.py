@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 import signal
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from rich.console import Console
 from rich.table import Table
@@ -40,6 +40,25 @@ app = typer.Typer(
 console = Console()
 
 DEFAULT_STRUCTURE_FILE = Path.home() / ".config" / "auto-file" / "folder_structure.yaml"
+
+
+DEFAULT_LLM_MODEL = Path("/mnt/ssd/models/gemma-4-E2B/gemma-4-E2B_q4_0-it.gguf")
+DEFAULT_LLM_MMPROJ = Path("/mnt/ssd/models/gemma-4-E2B/gemma-4-E2B-it-mmproj.gguf")
+DEFAULT_LLM_BINARY = Path.home() / "backends/llama.cpp-build/build/bin/llama-server"
+
+
+def _llm_server_config(config_file: Path | None) -> dict[str, Any] | None:
+    """On-demand llama.cpp server config; None when no model is configured."""
+    model = get_config_value("llm_model", None, config_file)
+    if not model:
+        return None
+    return {
+        "binary": str(get_config_value("llm_binary", str(DEFAULT_LLM_BINARY), config_file)),
+        "model": str(model),
+        "mmproj": str(get_config_value("llm_mmproj", str(DEFAULT_LLM_MMPROJ), config_file)),
+        "port": int(get_config_value("llm_port", 8082, config_file)),
+        "idle_seconds": int(get_config_value("llm_idle_seconds", 300, config_file)),
+    }
 
 
 def _resolved_structure(config_file: Path | None) -> Path | None:
@@ -137,7 +156,7 @@ def sort(
         target_root=target_dest,
         audit_ledger=ledger,
         structure=_resolved_structure(config_file),
-        llama_url=get_config_value("llm_url", "http://127.0.0.1:8081", config_file),
+        llm_server=_llm_server_config(config_file),
     )
 
     results: list[PipelineResult] = []
@@ -600,7 +619,7 @@ def watch(
         target_root=target_dest,
         audit_ledger=ledger,
         structure=structure_path,
-        llama_url=get_config_value("llm_url", "http://127.0.0.1:8081", config_file),
+        llm_server=_llm_server_config(config_file),
     )
 
     def _on_file_processed(res: PipelineResult) -> None:

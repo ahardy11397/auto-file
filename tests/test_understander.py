@@ -610,3 +610,47 @@ def test_llama_server_unreachable_falls_back_to_deterministic():
 
     assert result.understood is False
     assert result.category_hint == "Document"
+
+
+# ==============================================================================
+# On-Demand LLM Server Lifecycle Tests
+# ==============================================================================
+
+
+def test_llama_server_manager_bad_binary_falls_back():
+    """A missing/unusable binary means ensure_running returns False quickly."""
+    from auto_file.core.understander import LlamaServerManager
+
+    mgr = LlamaServerManager(
+        binary="/nonexistent/llama-server",
+        model="/nonexistent/model.gguf",
+        port=8082,
+        idle_seconds=60,
+        start_timeout=3,
+    )
+    assert mgr.ensure_running() is False
+    mgr.shutdown()
+
+
+def test_understander_ondemand_spawn_failure_uses_deterministic_gate():
+    """When the on-demand server cannot start, thin content gates to
+    needs_review via the deterministic path instead of raising."""
+    u = GemmaUnderstander(
+        llama_server={
+            "binary": "/nonexistent/llama-server",
+            "model": "/nonexistent/model.gguf",
+            "port": 8082,
+            "idle_seconds": 60,
+            "start_timeout": 3,
+        }
+    )
+    result = u.understand(_content(), filename_hint="scan.pdf")
+    assert result.understood is False
+
+
+def test_llama_server_manager_url_and_idle():
+    from auto_file.core.understander import LlamaServerManager
+
+    mgr = LlamaServerManager(binary="x", model="y", port=8099, idle_seconds=42)
+    assert mgr.url == "http://127.0.0.1:8099"
+    assert mgr.idle_seconds == 42
