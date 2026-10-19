@@ -457,7 +457,13 @@ def _load_transformer_model(
     graceful fallback if offline or local files are missing.
     """
     import torch
-    from transformers import AutoModelForVision2Seq, AutoProcessor, BitsAndBytesConfig
+    try:
+        # transformers >= 5
+        from transformers import AutoModelForImageTextToText as _VisionModelCls
+    except ImportError:
+        # transformers < 5
+        from transformers import AutoModelForVision2Seq as _VisionModelCls
+    from transformers import AutoProcessor, BitsAndBytesConfig
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -481,7 +487,7 @@ def _load_transformer_model(
         try:
             processor = _from_pretrained(AutoProcessor)
             model = _from_pretrained(
-                AutoModelForVision2Seq,
+                _VisionModelCls,
                 quantization_config=bnb_config,
                 device_map=device,
             )
@@ -490,7 +496,7 @@ def _load_transformer_model(
             logger.warning("CUDA initialization failed or OOM (%s); falling back to CPU", exc)
             processor = _from_pretrained(AutoProcessor)
             model = _from_pretrained(
-                AutoModelForVision2Seq,
+                _VisionModelCls,
                 device_map="cpu",
                 torch_dtype=torch.float32,
             )
@@ -498,7 +504,7 @@ def _load_transformer_model(
     else:
         processor = _from_pretrained(AutoProcessor)
         model = _from_pretrained(
-            AutoModelForVision2Seq,
+            _VisionModelCls,
             device_map="cpu",
             torch_dtype=torch.float32,
         )
@@ -521,6 +527,7 @@ class GemmaUnderstander:
         device: str = "auto",
         mock_response: Any = None,
         mock_handler: Any = None,
+        llama_url: str | None = None,
     ) -> None:
         """Initialize Gemma understander.
 
@@ -533,12 +540,19 @@ class GemmaUnderstander:
             device: Target device mapping ('auto', 'cuda', 'cpu').
             mock_response: Optional fixed response (UnderstandingResult, string, or callable).
             mock_handler: Optional custom callback for mock execution.
+            llama_url: Optional OpenAI-compatible LLM server base URL (e.g.
+                'http://127.0.0.1:8081' for the packaged llama.cpp Gemma service).
+                When set, this server is the primary understanding path: it is
+                much faster than in-process transformers and supports vision for
+                scanned documents. Unreachable servers fall back to the
+                deterministic path.
         """
         self.model_id = model_id
         self.mock = mock
         self.device = device
         self.mock_response = mock_response
         self.mock_handler = mock_handler
+        self.llama_url = (llama_url or "").rstrip("/") or None
 
         # Test hook: AUTO_FILE_UNDERSTANDER=mock forces deterministic mode so
         # the test suite never attempts a real model download or GPU load.
@@ -657,6 +671,16 @@ class GemmaUnderstander:
         if self.mock:
             return self._understand_deterministic(content, filename_hint)
 
+        # 2.5 Packaged LLM server (llama.cpp serving Gemma) — primary neural
+        # path: fast on this hardware and supports vision for scans. An
+        # unreachable server falls straight to the deterministic path rather
+        # than the very slow in-process transformers route.
+        if self.llama_url:
+            result = self._understand_via_llama_server(content, filename_hint)
+            if result is not None:
+                return result
+            return self._understand_deterministic(content, filename_hint)
+
         # 3. Model loading
         self._ensure_loaded()
         if self.mock or self._model is None or self._processor is None:
@@ -708,6 +732,94 @@ class GemmaUnderstander:
         except Exception as exc:
             logger.warning("Neural understanding failed (%s); falling back to deterministic mode", exc)
             return self._understand_deterministic(content, filename_hint)
+
+    def _understand_via_llama_server(
+        self,
+        content: ExtractedContent,
+        filename_hint: str | None = None,
+    ) -> UnderstandingResult | None:
+        """Understand via the packaged llama.cpp OpenAI-compatible server.
+
+        Returns None when the server is unreachable so the caller can fall
+        back to the deterministic path. Vision: extracted page images are
+        sent as base64 data URLs when the server was started with an mmproj.
+        """
+        import base64
+        import io
+        import json as _json
+        import urllib.request
+
+        prompt = self.generate_prompt(content, filename_hint)
+        content_parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+        if content.image_content is not None:
+            buf = io.BytesIO()
+            content.image_content.save(buf, format="PNG")
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+            content_parts.append(
+                {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+            )
+
+        payload = _json.dumps(
+            {
+                "model": "gemma-4-E2B-it",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a document classifier. Respond with ONLY the requested "
+                            "JSON object. Do not think out loud and do not explain."
+                        ),
+                    },
+                    {"role": "user", "content": content_parts},
+                ],
+                "temperature": 0,
+                "max_tokens": 1024,
+                "stream": False,
+                "chat_template_kwargs": {"enable_thinking": False},
+            }
+        ).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{self.llama_url}/v1/chat/completions",
+            data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=300) as resp:
+                body = _json.loads(resp.read().decode("utf-8"))
+            message = body["choices"][0]["message"]
+            # Thinking-disabled servers fill content; if thinking still leaks
+            # into reasoning_content, fall back to parsing that.
+            raw_output = message.get("content") or message.get("reasoning_content") or ""
+        except Exception as exc:
+            logger.warning("LLM server at %s unreachable or failed (%s); using deterministic fallback", self.llama_url, exc)
+            return None
+
+        try:
+            result = parse_llm_json_response(raw_output)
+
+            # Garbage check: the model ran but understood nothing (empty
+            # output, or it punted to a generic/unclassified category with
+            # nothing usable for a description) — flag for review instead of
+            # renaming the file into a generic folder.
+            raw_clean = (raw_output or "").strip()
+            uninformative = result.category_hint in {
+                "",
+                "Document",
+                "Misc",
+                "Unknown",
+                "Uncategorized",
+            }
+            if not raw_clean or uninformative:
+                result.understood = False
+
+            if result.content_date is None and content.exif_date:
+                result.content_date = normalize_date_string(content.exif_date)
+
+            return result
+        except Exception as exc:
+            logger.warning("LLM server output could not be parsed (%s); using deterministic fallback", exc)
+            return None
 
     def __call__(
         self,

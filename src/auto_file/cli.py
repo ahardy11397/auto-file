@@ -137,6 +137,7 @@ def sort(
         target_root=target_dest,
         audit_ledger=ledger,
         structure=_resolved_structure(config_file),
+        llama_url=get_config_value("llm_url", "http://127.0.0.1:8081", config_file),
     )
 
     results: list[PipelineResult] = []
@@ -599,6 +600,7 @@ def watch(
         target_root=target_dest,
         audit_ledger=ledger,
         structure=structure_path,
+        llama_url=get_config_value("llm_url", "http://127.0.0.1:8081", config_file),
     )
 
     def _on_file_processed(res: PipelineResult) -> None:

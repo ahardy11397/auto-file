@@ -294,7 +294,7 @@ def test_understander_model_loading_and_cuda_oom_fallback():
             "torch": mock_torch,
             "transformers": MagicMock(
                 AutoProcessor=mock_auto_proc,
-                AutoModelForVision2Seq=mock_auto_model,
+                AutoModelForImageTextToText=mock_auto_model,
                 BitsAndBytesConfig=mock_bnb_config_cls,
             ),
         },
@@ -464,7 +464,7 @@ def test_understander_model_loading_passes_local_files_only():
             "torch": mock_torch,
             "transformers": MagicMock(
                 AutoProcessor=mock_auto_proc,
-                AutoModelForVision2Seq=mock_auto_model,
+                AutoModelForImageTextToText=mock_auto_model,
                 BitsAndBytesConfig=MagicMock(),
             ),
         },
@@ -546,3 +546,67 @@ def test_neural_empty_output_is_not_understood():
 
     result = u.understand(_content("some text"), filename_hint="mystery.pdf")
     assert result.understood is False
+
+
+# ==============================================================================
+# Packaged LLM Server (llama.cpp) Path Tests
+# ==============================================================================
+
+
+class _FakeResponse:
+    def __init__(self, body: dict):
+        self._body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self):
+        import json
+        return json.dumps(self._body).encode("utf-8")
+
+
+def test_llama_server_path_parses_understanding():
+    """The packaged llama.cpp server response is parsed into a result."""
+    from unittest.mock import patch
+
+    u = GemmaUnderstander(mock=False, llama_url="http://127.0.0.1:8081")
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        '```json\n{"content_date": "2026-05-07", "file_description": "insurance_letter", '
+                        '"detected_entities": ["State Farm"], "category_hint": "Insurance", '
+                        '"summary": "Renters insurance verification letter"}\n```'
+                    )
+                }
+            }
+        ]
+    }
+    with patch("urllib.request.urlopen", return_value=_FakeResponse(body)):
+        result = u.understand(_content(" renters policy documents "), filename_hint="scan.pdf")
+
+    assert result.understood is True
+    assert result.category_hint == "Insurance"
+    assert result.content_date == "2026-05-07"
+
+
+def test_llama_server_unreachable_falls_back_to_deterministic():
+    """An unreachable server must fall back to the deterministic path (which
+    gates thin content to needs_review) instead of raising."""
+    from unittest.mock import patch
+    import urllib.error
+
+    u = GemmaUnderstander(mock=False, llama_url="http://127.0.0.1:8081")
+
+    def _refuse(*args, **kwargs):
+        raise urllib.error.URLError("connection refused")
+
+    with patch("urllib.request.urlopen", side_effect=_refuse):
+        result = u.understand(_content(), filename_hint="scan.pdf")
+
+    assert result.understood is False
+    assert result.category_hint == "Document"

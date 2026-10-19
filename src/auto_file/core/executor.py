@@ -81,6 +81,7 @@ class FilePipelineExecutor:
         laya_model_path: Path | str | None = None,
         exact_spelling: bool = False,
         structure: Path | str | None = None,
+        llama_url: str | None = None,
     ) -> None:
         """Initialize the pipeline executor.
 
@@ -95,11 +96,15 @@ class FilePipelineExecutor:
             structure: Optional path to a YAML folder-structure file. When
                 given, routing follows that file instead of the built-in
                 defaults (ignored when a custom router is supplied).
+            llama_url: Optional OpenAI-compatible LLM server URL (packaged
+                llama.cpp Gemma service, e.g. http://127.0.0.1:8081) used as
+                the primary understanding path. Falls back to the
+                deterministic understander when unreachable.
         """
         self.target_root = Path(target_root)
         self.audit_ledger = audit_ledger
         self.dispatcher = dispatcher or LayaDispatcher(model_path=laya_model_path)
-        self.understander = understander or GemmaUnderstander()
+        self.understander = understander or GemmaUnderstander(llama_url=llama_url)
         if router is not None:
             self.router = router
         elif structure is not None:
