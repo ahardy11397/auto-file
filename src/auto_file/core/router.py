@@ -97,7 +97,7 @@ _PERSON_RECORD_SLOTS = [
 ]
 _PERSON_GENERIC_DOC_HINTS = {"doc", "form", "application", "agreement", "resume", "cv", "contract", "passport"}
 
-_ROOT_FINANCIAL_HINT_SLOTS = ["bank statement", "bill", "financial", "receipt", "tax", "w-2", "1099"]
+_ROOT_FINANCIAL_HINT_SLOTS = ["bank statement", "bill", "financial", "receipt", "tax", "w-2", "1099", "insurance"]
 _ROOT_LEGAL_HINT_SLOTS = ["court", "lawsuit", "legal"]
 _ROOT_PROPERTY_HINT_SLOTS = ["vehicle", "real estate", "property"]
 _ROOT_MANUALS_HINT_SLOTS = ["manual", "user guide"]
@@ -117,6 +117,9 @@ _FINANCIAL_SLOTS = [
     "irs",
     "financial",
     "ledger",
+    "insurance",
+    "premium",
+    "deductible",
 ]
 _LEGAL_SLOTS = [
     "court",
@@ -298,11 +301,18 @@ class TaxonomyRouter:
         root = self.taxonomy.fallback_root()
         return Path(root) if root else Path("Misc")
 
-    def _root_or_misc(self, root: str, combined: str = "") -> Path:
-        """Fallback under a root: keyword-matched child, then Misc, then root."""
+    def _root_or_misc(self, root: str, combined: str = "", slots: list[str] | None = None) -> Path:
+        """Fallback under a root: keyword-declared child, then a child whose
+        name matches a content-triggered slot, then Misc, then the root."""
         hit = self.taxonomy.child_by_keywords(root, combined)
         if hit:
             return Path(root) / hit
+        if slots:
+            triggered = [s for s in slots if s in combined]
+            if triggered:
+                hit = self.taxonomy.child(root, *triggered)
+                if hit:
+                    return Path(root) / hit
         misc = self.taxonomy.misc_child(root)
         return Path(root) / misc if misc else Path(root)
 
@@ -660,7 +670,7 @@ class TaxonomyRouter:
             return Path(financial) / documents
 
         # Default for financial
-        return self._root_or_misc(financial, combined)
+        return self._root_or_misc(financial, combined, slots=_FINANCIAL_SLOTS)
 
     def _resolve_legal_subpath(
         self,
@@ -679,7 +689,7 @@ class TaxonomyRouter:
                     return Path(legal) / court / clean_case
             return Path(legal) / court
 
-        return self._root_or_misc(legal, combined)
+        return self._root_or_misc(legal, combined, slots=_LEGAL_SLOTS)
 
     def _resolve_property_subpath(
         self,
@@ -698,7 +708,7 @@ class TaxonomyRouter:
         if real_estate and any(k in combined for k in _REAL_ESTATE_SLOTS):
             return Path(property_root) / real_estate
 
-        return self._root_or_misc(property_root, combined)
+        return self._root_or_misc(property_root, combined, slots=_PROPERTY_SLOTS)
 
     def _resolve_manuals_subpath(
         self,
@@ -727,7 +737,7 @@ class TaxonomyRouter:
         if tools and any(k in combined for k in _TOOLS_SLOTS):
             return Path(manuals) / tools
 
-        return self._root_or_misc(manuals, combined)
+        return self._root_or_misc(manuals, combined, slots=_MANUALS_SLOTS)
 
 
 def resolve_destination(

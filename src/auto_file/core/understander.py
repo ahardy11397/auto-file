@@ -263,6 +263,20 @@ def _extract_category_hint_from_text(text: str) -> str:
     if any(
         k in tl
         for k in [
+            "insurance",
+            "renter's insurance",
+            "renters insurance",
+            "policy number",
+            "premium",
+            "deductible",
+            "coverage",
+            "proof of insurance",
+        ]
+    ):
+        return "Insurance"
+    if any(
+        k in tl
+        for k in [
             "medical",
             "clinic",
             "hospital",
@@ -723,6 +737,22 @@ class GemmaUnderstander:
                 desc_parts.append(f"{bank}_statement")
             else:
                 desc_parts.append("bank_statement")
+        elif category_hint == "Insurance":
+            insurer = next(
+                (
+                    e
+                    for e in entities
+                    if any(
+                        w in e.lower()
+                        for w in ["insurance", "state farm", "allstate", "geico", "progressive", "liberty mutual", "usaa", "farmers"]
+                    )
+                ),
+                None,
+            )
+            if insurer:
+                desc_parts.append(f"insurance_{insurer}")
+            else:
+                desc_parts.append("insurance_letter")
         elif category_hint == "Medical Record":
             person = next((e for e in entities if e in CANONICAL_PEOPLE), None)
             if person:

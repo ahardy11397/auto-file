@@ -214,7 +214,12 @@ def history(
         25,
         "--limit",
         "-n",
-        help="Maximum number of history records to display.",
+        help="Maximum number of records to display.",
+    ),
+    runs: bool = typer.Option(
+        False,
+        "--runs",
+        help="Show run summaries instead of individual file events.",
     ),
     audit_db: Optional[Path] = typer.Option(
         None,
@@ -232,7 +237,7 @@ def history(
         help="Inspect individual file events for a specific run ID.",
     ),
 ) -> None:
-    """View audit history of past organization runs and file events."""
+    """View recent file moves: original name, where it was filed, and status."""
     resolved_audit_db = get_audit_db_path(config_file, audit_db)
     ledger = AuditLedger(resolved_audit_db)
 
@@ -274,38 +279,66 @@ def history(
         console.print(table)
         return
 
-    history_records = ledger.get_history(limit=limit)
-    if not history_records:
-        console.print("[yellow]No run history found in audit ledger.[/yellow]")
+    if runs:
+        history_records = ledger.get_history(limit=limit)
+        if not history_records:
+            console.print("[yellow]No run history found in audit ledger.[/yellow]")
+            return
+
+        table = Table(
+            title="Audit Run History",
+            show_header=True,
+            header_style="bold cyan",
+        )
+        table.add_column("Run ID", style="cyan", overflow="fold")
+        table.add_column("Started At", style="white", overflow="fold")
+        table.add_column("Mode", style="magenta", no_wrap=True)
+        table.add_column("Source Root", style="dim", overflow="fold")
+        table.add_column("Target Root", style="dim", overflow="fold")
+        table.add_column("Total", justify="right")
+        table.add_column("Success", justify="right", style="green")
+        table.add_column("Failed", justify="right", style="red")
+
+        for run in history_records:
+            table.add_row(
+                str(run["run_id"]),
+                str(run["started_at"]),
+                str(run["mode"]),
+                str(run["source_root"]),
+                str(run["target_root"]),
+                str(run["total_files"]),
+                str(run["successful_files"]),
+                str(run["failed_files"]),
+            )
+
+        console.print(table)
         return
 
-    table = Table(
-        title="Audit Run History",
-        show_header=True,
-        header_style="bold cyan",
-    )
-    table.add_column("Run ID", style="cyan", overflow="fold")
-    table.add_column("Started At", style="white", overflow="fold")
-    table.add_column("Mode", style="magenta", no_wrap=True)
-    table.add_column("Source Root", style="dim", overflow="fold")
-    table.add_column("Target Root", style="dim", overflow="fold")
-    table.add_column("Total", justify="right")
-    table.add_column("Success", justify="right", style="green")
-    table.add_column("Failed", justify="right", style="red")
+    events = ledger.get_recent_events(limit=limit)
+    if not events:
+        console.print("[yellow]No file history found in audit ledger.[/yellow]")
+        console.print("[dim]Tip: 'auto-file history --runs' shows run summaries.[/dim]")
+        return
 
-    for run in history_records:
-        table.add_row(
-            str(run["run_id"]),
-            str(run["started_at"]),
-            str(run["mode"]),
-            str(run["source_root"]),
-            str(run["target_root"]),
-            str(run["total_files"]),
-            str(run["successful_files"]),
-            str(run["failed_files"]),
+    console.print("[bold]Recent File Moves[/bold] (newest first)")
+    for event in events:
+        status_lower = event["status"].lower()
+        if status_lower == "moved":
+            status_style = "[green]moved[/green]"
+        elif status_lower == "rolled_back":
+            status_style = "[yellow]rolled_back[/yellow]"
+        elif status_lower == "duplicate_skipped":
+            status_style = "[cyan]duplicate_skipped[/cyan]"
+        elif status_lower == "failed":
+            status_style = "[red]failed[/red]"
+        else:
+            status_style = event["status"]
+
+        console.print(
+            f"{event.get('timestamp', '-')}  {status_style}  "
+            f"{Path(event['original_path']).name} -> {event['destination_path']}",
+            soft_wrap=True,
         )
-
-    console.print(table)
 
 
 @app.command()

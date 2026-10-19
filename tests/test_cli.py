@@ -142,7 +142,7 @@ def test_cli_sort_missing_dest_errors(tmp_path: Path):
 
 
 def test_cli_history_empty_and_populated(tmp_path: Path):
-    """Verify history displays rich table of runs."""
+    """History shows individual file moves by default; run summaries via --runs."""
     audit_db = tmp_path / "audit.db"
     dest_dir = tmp_path / "sorted"
     f = tmp_path / "receipt.txt"
@@ -151,7 +151,7 @@ def test_cli_history_empty_and_populated(tmp_path: Path):
     # History before any runs
     res_empty = runner.invoke(app, ["history", "--audit-db", str(audit_db)])
     assert res_empty.exit_code == 0
-    assert "No run history" in res_empty.output or "Run ID" in res_empty.output
+    assert "No file history" in res_empty.output
 
     # Perform a run
     sort_res = runner.invoke(
@@ -160,12 +160,19 @@ def test_cli_history_empty_and_populated(tmp_path: Path):
     )
     assert sort_res.exit_code == 0
 
-    # History after run
+    # Default history: individual file events with original and filed names
     res_history = runner.invoke(app, ["history", "--audit-db", str(audit_db)])
     assert res_history.exit_code == 0
-    assert "Run ID" in res_history.output
-    assert "Mode" in res_history.output
-    assert "cli_single" in res_history.output
+    assert "Recent File Moves" in res_history.output
+    assert "receipt.txt" in res_history.output
+    assert str(dest_dir) in res_history.output
+    assert "moved" in res_history.output
+
+    # Run summaries behind --runs
+    res_runs = runner.invoke(app, ["history", "--runs", "--audit-db", str(audit_db)])
+    assert res_runs.exit_code == 0
+    assert "Run ID" in res_runs.output
+    assert "cli_single" in res_runs.output
 
     # Test limit option
     res_limit = runner.invoke(app, ["history", "--limit", "1", "--audit-db", str(audit_db)])

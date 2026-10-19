@@ -313,6 +313,27 @@ class AuditLedger:
             )
             return [dict(row) for row in cur.fetchall()]
 
+    def get_recent_events(self, limit: int = 25) -> list[dict[str, Any]]:
+        """Retrieve recent file events across all runs, newest first.
+
+        Args:
+            limit: Maximum number of event records to return.
+
+        Returns:
+            List of file event dictionaries.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT *
+                FROM file_events
+                ORDER BY timestamp DESC, rowid DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         """Fetch details for a specific run.
 

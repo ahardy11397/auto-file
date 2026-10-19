@@ -152,6 +152,51 @@ def test_router_root_keywords_route_traffic(tmp_path):
     assert router.resolve_destination(summary="insurance premium statement") == Path("Financial/Insurance")
 
 
+def test_heuristic_hint_insurance_letter():
+    """A renters-insurance verification letter must not be mistaken for a
+    medical record even when it mentions medical coverage."""
+    from auto_file.core.understander import _extract_category_hint_from_text
+
+    text = (
+        "RENTERS INSURANCE VERIFICATION LETTER\n"
+        "Policy number: RIV-4471\n"
+        "This letter verifies renter's insurance coverage including "
+        "medical payments to others coverage for the above-named tenant."
+    )
+    assert _extract_category_hint_from_text(text) == "Insurance"
+
+
+def test_router_insurance_letter_routes_to_insurance_child(tmp_path):
+    structure = tmp_path / "structure.yaml"
+    structure.write_text(
+        textwrap.dedent(
+            """
+            roots:
+              Financial:
+                subfolders:
+                  Insurance: {}
+                  Misc: {}
+              Misc: {}
+            """
+        ),
+        encoding="utf-8",
+    )
+    router = TaxonomyRouter(taxonomy=load_taxonomy(structure))
+    # 'insurance' triggers the Financial branch; the Insurance child matches
+    # by name and the letter must not land in Misc.
+    assert (
+        router.resolve_destination(summary="renters insurance verification letter with policy number")
+        == Path("Financial/Insurance")
+    )
+
+
+def test_router_default_insurance_falls_back_gracefully():
+    router = TaxonomyRouter()
+    result = router.resolve_destination(summary="renters insurance verification letter with policy number")
+    # Default taxonomy has no Insurance folder; must land under Financial, not Misc
+    assert result.parts[0] == "Financial"
+
+
 def test_router_default_taxonomy_unchanged_behavior():
     router = TaxonomyRouter()
     assert router.resolve_destination(entities=["Alpha"], category_hint="medical") == Path("People/Alpha/Medical")
