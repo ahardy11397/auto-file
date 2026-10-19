@@ -611,7 +611,7 @@ class TaxonomyRouter:
         bank = taxonomy.child(financial, "bank statement")
         if bank and (
             any(
-                taxonomy in combined
+                k in combined
                 for k in ["bank statement", "account statement", "checking statement", "savings statement"]
             )
             or hint_lower == "bank statement"
