@@ -135,6 +135,27 @@ class Taxonomy:
         """Find a grandchild of ``root/child`` matching any slot word."""
         return self._match(self.grandchildren.get(root, {}).get(child, []), {}, list(slots))
 
+    def folder_by_filename(self, root: str, filename: str) -> tuple[str, ...] | None:
+        """Find a child or grandchild of ``root`` whose name appears in a filename.
+
+        Scanned documents often have no extractable text, leaving the filename
+        as the only signal (e.g. 'OneMain Financial.pdf' -> Bills/OneMain).
+        Grandchildren are preferred over their parent child. Short names
+        (under 5 characters) are skipped to avoid false matches.
+        """
+        norm_file = _norm(filename)
+        if not norm_file:
+            return None
+        for child in self.children.get(root, []):
+            grandkids = self.grandchildren.get(root, {}).get(child, [])
+            for descendant in list(grandkids) + [child]:
+                n = _norm(descendant)
+                if len(n) >= 5 and n in norm_file:
+                    if descendant == child:
+                        return (child,)
+                    return (child, descendant)
+        return None
+
     def misc_child(self, root: str) -> str | None:
         """Find the catch-all child of ``root`` (Misc/General/Other), if any."""
         for child in self.children.get(root, []):

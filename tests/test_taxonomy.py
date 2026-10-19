@@ -248,6 +248,33 @@ def test_router_resume_goes_to_documents_not_medical():
     assert result == Path("People/Alpha/Documents")
 
 
+def test_router_scanned_document_files_by_filename(tmp_path):
+    """A scanned PDF has no text; 'OneMain Financial.pdf' must land in the
+    existing Bills/OneMain vendor folder via the filename alone."""
+    structure = tmp_path / "structure.yaml"
+    structure.write_text(
+        textwrap.dedent(
+            """
+            roots:
+              Financial:
+                subfolders:
+                  Bills:
+                    subfolders: [OneMain, Due]
+                  Misc: {}
+              Misc: {}
+            """
+        ),
+        encoding="utf-8",
+    )
+    router = TaxonomyRouter(taxonomy=load_taxonomy(structure))
+    result = router.resolve_destination(
+        summary="Document file",  # all the heuristic gets from a scan
+        category_hint="Document",
+        filename_hint="OneMain Financial.pdf",
+    )
+    assert result == Path("Financial/Bills/OneMain")
+
+
 def test_router_default_taxonomy_unchanged_behavior():
     router = TaxonomyRouter()
     assert router.resolve_destination(entities=["Alpha"], category_hint="medical") == Path("People/Alpha/Medical")

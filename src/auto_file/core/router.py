@@ -301,9 +301,16 @@ class TaxonomyRouter:
         root = self.taxonomy.fallback_root()
         return Path(root) if root else Path("Misc")
 
-    def _root_or_misc(self, root: str, combined: str = "", slots: list[str] | None = None) -> Path:
+    def _root_or_misc(
+        self,
+        root: str,
+        combined: str = "",
+        slots: list[str] | None = None,
+        filename: str | None = None,
+    ) -> Path:
         """Fallback under a root: keyword-declared child, then a child whose
-        name matches a content-triggered slot, then Misc, then the root."""
+        name matches a content-triggered slot, then an existing folder named
+        in the filename, then Misc, then the root."""
         hit = self.taxonomy.child_by_keywords(root, combined)
         if hit:
             return Path(root) / hit
@@ -313,6 +320,10 @@ class TaxonomyRouter:
                 hit = self.taxonomy.child(root, *triggered)
                 if hit:
                     return Path(root) / hit
+        if filename:
+            parts = self.taxonomy.folder_by_filename(root, filename)
+            if parts:
+                return Path(root).joinpath(*parts)
         misc = self.taxonomy.misc_child(root)
         return Path(root) / misc if misc else Path(root)
 
@@ -494,7 +505,10 @@ class TaxonomyRouter:
         """Execute hierarchical deterministic branch resolution."""
         hint_lower = hint.lower()
         summary_lower = summary.lower()
-        combined = f"{hint_lower} {summary_lower}"
+        filename_lower = (filename_hint or "").lower()
+        # The filename participates in trigger matching: scanned documents have
+        # no extractable text, leaving the filename as the only signal.
+        combined = f"{hint_lower} {summary_lower} {filename_lower}"
 
         person = self._find_person(entities, hint, summary, filename_hint)
         person_root = self.taxonomy.person_root
@@ -523,7 +537,7 @@ class TaxonomyRouter:
         financial = self._role_root("Financial")
         financial = self._trigger(financial, onnx_root, is_explicit_financial, _FINANCIAL_SLOTS, combined)
         if financial is not None:
-            return self._resolve_financial_subpath(financial, entities, hint_lower, summary_lower, combined)
+            return self._resolve_financial_subpath(financial, entities, hint_lower, summary_lower, combined, filename_hint)
 
         # ----------------------------------------------------------------------
         # Branch 3: Legal
@@ -531,7 +545,7 @@ class TaxonomyRouter:
         legal = self._role_root("Legal")
         legal = self._trigger(legal, onnx_root, is_explicit_legal, _LEGAL_SLOTS, combined)
         if legal is not None:
-            return self._resolve_legal_subpath(legal, entities, hint_lower, summary_lower, combined)
+            return self._resolve_legal_subpath(legal, entities, hint_lower, summary_lower, combined, filename_hint)
 
         # ----------------------------------------------------------------------
         # Branch 4: Property
@@ -539,7 +553,7 @@ class TaxonomyRouter:
         property_root = self._role_root("Property")
         property_root = self._trigger(property_root, onnx_root, is_explicit_property, _PROPERTY_SLOTS, combined)
         if property_root is not None:
-            return self._resolve_property_subpath(property_root, entities, hint_lower, summary_lower, combined)
+            return self._resolve_property_subpath(property_root, entities, hint_lower, summary_lower, combined, filename_hint)
 
         # ----------------------------------------------------------------------
         # Branch 5: Manuals
@@ -547,7 +561,7 @@ class TaxonomyRouter:
         manuals = self._role_root("Manuals")
         manuals = self._trigger(manuals, onnx_root, is_explicit_manuals, _MANUALS_SLOTS, combined)
         if manuals is not None:
-            return self._resolve_manuals_subpath(manuals, entities, hint_lower, summary_lower, combined)
+            return self._resolve_manuals_subpath(manuals, entities, hint_lower, summary_lower, combined, filename_hint)
 
         # ----------------------------------------------------------------------
         # Branch 6: Fallback to Person if person found earlier
@@ -629,6 +643,7 @@ class TaxonomyRouter:
         hint_lower: str,
         summary_lower: str,
         combined: str,
+        filename_hint: str | None = None,
     ) -> Path:
         """Resolve subfolder under Financial/."""
         taxonomy = self.taxonomy
@@ -637,6 +652,13 @@ class TaxonomyRouter:
             if not entities:
                 return None
             return sanitize_folder_name(entities[0]) or None
+
+        # 0. Vendor folder named in the filename outranks a generic hint —
+        #    scanned documents have no text, so the filename is the signal.
+        if filename_hint:
+            parts = taxonomy.folder_by_filename(financial, filename_hint)
+            if parts:
+                return Path(financial).joinpath(*parts)
 
         # 1. Bank Statements
         bank = taxonomy.child(financial, "bank statement")
@@ -691,7 +713,7 @@ class TaxonomyRouter:
             return Path(financial) / documents
 
         # Default for financial
-        return self._root_or_misc(financial, combined, slots=_FINANCIAL_SLOTS)
+        return self._root_or_misc(financial, combined, slots=_FINANCIAL_SLOTS, filename=filename_hint)
 
     def _resolve_legal_subpath(
         self,
@@ -700,6 +722,7 @@ class TaxonomyRouter:
         hint_lower: str,
         summary_lower: str,
         combined: str,
+        filename_hint: str | None = None,
     ) -> Path:
         """Resolve subfolder under Legal/."""
         court = self.taxonomy.child(legal, "court")
@@ -710,7 +733,7 @@ class TaxonomyRouter:
                     return Path(legal) / court / clean_case
             return Path(legal) / court
 
-        return self._root_or_misc(legal, combined, slots=_LEGAL_SLOTS)
+        return self._root_or_misc(legal, combined, slots=_LEGAL_SLOTS, filename=filename_hint)
 
     def _resolve_property_subpath(
         self,
@@ -719,6 +742,7 @@ class TaxonomyRouter:
         hint_lower: str,
         summary_lower: str,
         combined: str,
+        filename_hint: str | None = None,
     ) -> Path:
         """Resolve subfolder under Property/."""
         vehicles = self.taxonomy.child(property_root, "vehicle")
@@ -729,7 +753,7 @@ class TaxonomyRouter:
         if real_estate and any(k in combined for k in _REAL_ESTATE_SLOTS):
             return Path(property_root) / real_estate
 
-        return self._root_or_misc(property_root, combined, slots=_PROPERTY_SLOTS)
+        return self._root_or_misc(property_root, combined, slots=_PROPERTY_SLOTS, filename=filename_hint)
 
     def _resolve_manuals_subpath(
         self,
@@ -738,6 +762,7 @@ class TaxonomyRouter:
         hint_lower: str,
         summary_lower: str,
         combined: str,
+        filename_hint: str | None = None,
     ) -> Path:
         """Resolve subfolder under Manuals/."""
         taxonomy = self.taxonomy
@@ -758,7 +783,7 @@ class TaxonomyRouter:
         if tools and any(k in combined for k in _TOOLS_SLOTS):
             return Path(manuals) / tools
 
-        return self._root_or_misc(manuals, combined, slots=_MANUALS_SLOTS)
+        return self._root_or_misc(manuals, combined, slots=_MANUALS_SLOTS, filename=filename_hint)
 
 
 def resolve_destination(
