@@ -1,5 +1,9 @@
 """Tests for Gemma 4 E2B multimodal understander and LLM response parsing."""
 
+import json as _json
+import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import MagicMock, patch
 from PIL import Image
 import pytest
@@ -7,6 +11,7 @@ import pytest
 from auto_file.core.extractors.base import ExtractedContent
 from auto_file.core.understander import (
     GemmaUnderstander,
+    LlamaServerManager,
     UnderstandingResult,
     normalize_date_string,
     parse_llm_json_response,
@@ -371,7 +376,7 @@ def test_understander_long_text_truncation_in_prompt():
 
 def test_understander_neural_inference_mocked():
     """Test full neural inference execution path with mocked model and processor."""
-    understander = GemmaUnderstander(mock=False)
+    understander = GemmaUnderstander(mock=False, backend="transformers")
     mock_model = MagicMock()
     mock_model.device = "cpu"
     mock_processor = MagicMock()
@@ -404,7 +409,7 @@ def test_understander_neural_inference_mocked():
 
 def test_understander_neural_inference_exception_fallback():
     """Verify neural inference failure gracefully falls back to deterministic extraction."""
-    understander = GemmaUnderstander(mock=False)
+    understander = GemmaUnderstander(mock=False, backend="transformers")
     mock_model = MagicMock()
     mock_model.device = "cpu"
     mock_processor = MagicMock()
@@ -531,7 +536,10 @@ def test_deterministic_rich_generic_text_is_understood():
 
 def test_neural_empty_output_is_not_understood():
     """The model running but returning nothing means it did not understand."""
-    u = GemmaUnderstander()
+    # mock=False + backend="transformers": the neural path really runs here.
+    # The autouse AUTO_FILE_UNDERSTANDER=mock fixture must not divert it to
+    # the deterministic path, or this test proves nothing.
+    u = GemmaUnderstander(mock=False, backend="transformers")
     u._model = MagicMock()
     u._processor = MagicMock()
     u._is_loaded = True
@@ -594,6 +602,34 @@ def test_llama_server_path_parses_understanding():
     assert result.content_date == "2026-05-07"
 
 
+def test_llama_server_generic_category_still_counts_as_understood():
+    """'Misc' is a category the prompt itself offers — not a failure.
+
+    A model that reads the document and reports a generic category with a
+    real description has understood it; the file must not be parked for
+    review just because the category is generic.
+    """
+    u = GemmaUnderstander(mock=False, llama_url="http://127.0.0.1:8081")
+    body = {
+        "choices": [
+            {
+                "message": {
+                    "content": (
+                        '```json\n{"content_date": null, "file_description": "wedding_invitation", '
+                        '"detected_entities": ["Bravo"], "category_hint": "Misc", '
+                        '"summary": "Invitation to the wedding of Bravo and Delta"}\n```'
+                    )
+                }
+            }
+        ]
+    }
+    with patch("urllib.request.urlopen", return_value=_FakeResponse(body)):
+        result = u.understand(_content(" wedding invitation "), filename_hint="invite.pdf")
+
+    assert result.understood is True
+    assert result.category_hint == "Misc"
+
+
 def test_llama_server_unreachable_falls_back_to_deterministic():
     """An unreachable server must fall back to the deterministic path (which
     gates thin content to needs_review) instead of raising."""
@@ -654,3 +690,315 @@ def test_llama_server_manager_url_and_idle():
     mgr = LlamaServerManager(binary="x", model="y", port=8099, idle_seconds=42)
     assert mgr.url == "http://127.0.0.1:8099"
     assert mgr.idle_seconds == 42
+
+
+# ==============================================================================
+# LLM Folder Routing Tests
+# ==============================================================================
+
+
+class _StubLLMServer:
+    """A minimal OpenAI-compatible HTTP server for the LLM code paths.
+
+    It records every chat request so a test can inspect the prompt that was
+    actually sent, and answers with a fixed assistant message.
+    """
+
+    def __init__(self, reply: str | None):
+        self.reply = reply
+        self.requests: list[dict] = []
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _send(self, obj):
+                body = _json.dumps(obj).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                self._send({"status": "ok"})
+
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length)
+                try:
+                    stub.requests.append(_json.loads(raw.decode("utf-8")))
+                except Exception:
+                    stub.requests.append({})
+                self._send({"choices": [{"message": {"content": stub.reply}}]})
+
+            def log_message(self, *args):  # keep the test output clean
+                pass
+
+        self._server = HTTPServer(("127.0.0.1", 0), Handler)
+        self.port = self._server.server_address[1]
+        self.url = f"http://127.0.0.1:{self.port}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+
+@pytest.fixture
+def stub_llm_server():
+    servers: list[_StubLLMServer] = []
+
+    def _make(reply: str | None) -> _StubLLMServer:
+        server = _StubLLMServer(reply)
+        servers.append(server)
+        return server
+
+    yield _make
+    for server in servers:
+        server.close()
+
+
+def _free_port() -> int:
+    """Return a port that nothing is listening on."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _route(understander, **overrides):
+    kwargs = {
+        "filename": "receipt.txt",
+        "summary": "Receipt from Target for $23.45.",
+        "description": "target_receipt",
+        "content_date": "2026-01-05",
+        "folder_choices": ["Financial/Bills", "Financial/Misc", "Misc"],
+    }
+    kwargs.update(overrides)
+    return understander.route_with_llama(**kwargs)
+
+
+def test_route_with_llama_parses_fenced_json(stub_llm_server):
+    """The model's answer is parsed out of a markdown code fence."""
+    server = stub_llm_server('```json\n{"folder": "Financial/Bills"}\n```')
+    u = GemmaUnderstander(mock=False, llama_url=server.url)
+
+    status, folder = _route(u)
+
+    assert status == "ok"
+    assert folder == "Financial/Bills"
+
+
+def test_route_with_llama_parses_plain_json(stub_llm_server):
+    server = stub_llm_server('{"folder": "Financial/Misc"}')
+    u = GemmaUnderstander(mock=False, llama_url=server.url)
+
+    status, folder = _route(u)
+
+    assert status == "ok"
+    assert folder == "Financial/Misc"
+
+
+def test_route_with_llama_reports_none_when_model_declines(stub_llm_server):
+    """'NONE' means the model found no fitting folder — not a failure."""
+    server = stub_llm_server('{"folder": "NONE"}')
+    u = GemmaUnderstander(mock=False, llama_url=server.url)
+
+    status, folder = _route(u)
+
+    assert status == "none"
+    assert folder is None
+
+
+def test_route_with_llama_unreachable_when_server_is_down():
+    """An unreachable server is reported, never guessed at."""
+    u = GemmaUnderstander(mock=False, llama_url=f"http://127.0.0.1:{_free_port()}")
+
+    status, folder = _route(u)
+
+    assert status == "unreachable"
+    assert folder is None
+    # The shared flag flips too: routing no longer claims LLM support.
+    assert u.has_llm_routing is False
+
+
+def test_route_with_llama_without_folder_choices_is_unreachable():
+    u = GemmaUnderstander(mock=False, llama_url="http://127.0.0.1:1")
+
+    status, folder = _route(u, folder_choices=[])
+
+    assert status == "unreachable"
+    assert folder is None
+
+
+def test_route_with_llama_prompt_lists_the_real_tree(stub_llm_server):
+    """The prompt shows the folder tree, so the model can pick from it."""
+    server = stub_llm_server('{"folder": "Financial/Bills"}')
+    u = GemmaUnderstander(mock=False, llama_url=server.url)
+
+    _route(u)
+
+    prompt = server.requests[0]["messages"][1]["content"][0]["text"]
+    assert "- Financial/Bills" in prompt
+    assert "- Misc" in prompt
+    assert "receipt.txt" in prompt
+
+
+def test_route_with_llama_prompt_advertises_dynamic_folders(stub_llm_server):
+    """'dynamic: true' folders must be advertised, or they are unreachable."""
+    server = stub_llm_server('{"folder": "Financial/Bills/Acme Corp"}')
+    u = GemmaUnderstander(mock=False, llama_url=server.url)
+
+    _route(u, dynamic_folders=["Financial/Bills"])
+
+    prompt = server.requests[0]["messages"][1]["content"][0]["text"]
+    assert "accept ONE new final folder" in prompt
+    dynamic_section = prompt.split("Folders that accept a new subfolder:")[1]
+    assert "- Financial/Bills" in dynamic_section
+
+
+def test_route_with_llama_uses_manager_url(stub_llm_server):
+    """When the manager owns the server, the routing call goes to it."""
+    server = stub_llm_server('{"folder": "Financial/Bills"}')
+    mgr = LlamaServerManager(
+        binary="/nonexistent/llama-server",
+        model="/nonexistent/model.gguf",
+        port=server.port,
+        idle_seconds=30,
+    )
+    u = GemmaUnderstander(mock=False, llama_server={"binary": mgr.binary, "model": mgr.model, "port": server.port})
+
+    status, folder = _route(u)
+
+    assert status == "ok"
+    assert folder == "Financial/Bills"
+    assert len(server.requests) == 1
+
+
+def test_route_with_llama_counts_as_in_flight_request(stub_llm_server):
+    """The routing call must hold the idle timer off while it runs."""
+    server = stub_llm_server('{"folder": "Financial/Bills"}')
+    mgr = LlamaServerManager(
+        binary="/nonexistent/llama-server",
+        model="/nonexistent/model.gguf",
+        port=server.port,
+        idle_seconds=30,
+    )
+    u = GemmaUnderstander(mock=False, llama_server={"binary": mgr.binary, "model": mgr.model, "port": server.port})
+
+    _route(u)
+
+    assert mgr._in_flight == 0
+
+
+# ==============================================================================
+# Server Ownership and Lifecycle Tests
+# ==============================================================================
+
+
+def _write_fake_llama_server(tmp_path) -> tuple:
+    """A stand-in llama-server whose command line carries our binary+model."""
+    binary = tmp_path / "llama-server"
+    binary.write_text(
+        "#!/usr/bin/env python3\nimport time\ntime.sleep(300)\n",
+        encoding="utf-8",
+    )
+    binary.chmod(0o755)
+    model = tmp_path / "gemma-test.gguf"
+    model.write_text("placeholder", encoding="utf-8")
+    return binary, model
+
+
+def test_manager_never_kills_a_foreign_pid_from_the_pidfile(tmp_path, monkeypatch):
+    """A recycled PID in the pidfile must never be signalled.
+
+    PIDs are reused by the OS: the pidfile may name an unrelated program.
+    Only a process whose command line carries our binary *and* our model is
+    ours to kill.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _, model = _write_fake_llama_server(tmp_path)
+    mgr = LlamaServerManager(
+        binary="/nonexistent/llama-server",
+        model=str(model),
+        port=8123,
+        idle_seconds=30,
+        start_timeout=2,
+    )
+
+    victim = subprocess.Popen(["sleep", "300"])
+    try:
+        mgr._pidfile.parent.mkdir(parents=True, exist_ok=True)
+        mgr._pidfile.write_text(str(victim.pid))
+
+        assert mgr.ensure_running() is False
+
+        # The unrelated process is untouched: we never signalled it.
+        assert victim.poll() is None
+    finally:
+        victim.terminate()
+        victim.wait(timeout=5)
+
+
+def test_manager_kills_the_orphan_it_started(tmp_path, monkeypatch):
+    """The ownership check must not disable cleanup of our own server."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    binary, model = _write_fake_llama_server(tmp_path)
+    mgr = LlamaServerManager(
+        binary=str(binary),
+        model=str(model),
+        port=8123,
+        idle_seconds=30,
+    )
+
+    proc = subprocess.Popen([str(binary), "-m", str(model), "--port", "8123"])
+    try:
+        mgr._pidfile.parent.mkdir(parents=True, exist_ok=True)
+        mgr._pidfile.write_text(str(proc.pid))
+        assert mgr._pidfile_pid() == proc.pid
+
+        mgr.shutdown()
+
+        # Our own server is stopped, so no model server is left running.
+        assert proc.wait(timeout=15) is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_manager_pidfile_is_scoped_to_the_port(tmp_path, monkeypatch):
+    """Two managers on different ports must not fight over one pidfile."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    a = LlamaServerManager(binary="x", model="y", port=8123)
+    b = LlamaServerManager(binary="x", model="y", port=8124)
+    assert a._pidfile != b._pidfile
+    assert "8123" in a._pidfile.name
+    assert "8124" in b._pidfile.name
+
+
+def test_understander_shutdown_server_stops_the_manager(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    binary, model = _write_fake_llama_server(tmp_path)
+    u = GemmaUnderstander(
+        mock=False,
+        llama_server={
+            "binary": str(binary),
+            "model": str(model),
+            "port": 8123,
+            "idle_seconds": 30,
+        },
+    )
+
+    u.shutdown_server()
+
+    assert u._server_mgr is not None
+    assert u._server_mgr.available is False
+
+
+def test_has_llm_routing_is_false_without_an_llm():
+    """The default (no LLM configured) never claims LLM routing."""
+    u = GemmaUnderstander()
+    assert u.backend == GemmaUnderstander.BACKEND_NONE
+    assert u.has_llm_routing is False

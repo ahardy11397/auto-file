@@ -11,8 +11,10 @@ from auto_file.config import get_structure_path, set_config_value
 from auto_file.core.executor import FilePipelineExecutor
 from auto_file.core.router import TaxonomyRouter
 from auto_file.core.taxonomy import (
+    Taxonomy,
     default_taxonomy,
     load_taxonomy,
+    sanitize_folder_name,
     taxonomy_to_yaml,
 )
 
@@ -42,6 +44,29 @@ CUSTOM_YAML = textwrap.dedent(
 def _write_custom_structure(tmp_path: Path) -> Path:
     structure = tmp_path / "structure.yaml"
     structure.write_text(CUSTOM_YAML, encoding="utf-8")
+    return structure
+
+
+DYNAMIC_YAML = textwrap.dedent(
+    """
+    people: [Alpha]
+    person_subfolders: [Records, Misc]
+    roots:
+      Financial:
+        role: Financial
+        subfolders:
+          Bills:
+            dynamic: true
+            subfolders: [Receipts, Due]
+          Misc: {}
+      Misc: {}
+    """
+)
+
+
+def _write_dynamic_structure(tmp_path: Path) -> Path:
+    structure = tmp_path / "dynamic.yaml"
+    structure.write_text(DYNAMIC_YAML, encoding="utf-8")
     return structure
 
 
@@ -108,6 +133,124 @@ def test_taxonomy_to_yaml_round_trip(tmp_path):
     assert loaded.person_root == tax.person_root
     assert loaded.children["Financial"] == tax.children["Financial"]
     assert loaded.grandchildren["Financial"]["Bills"] == tax.grandchildren["Financial"]["Bills"]
+
+
+# ==============================================================================
+# Folder tree enumeration and LLM path validation
+# ==============================================================================
+
+
+def test_all_paths_covers_roots_children_grandchildren_and_people():
+    """all_paths() is the single source of truth for the LLM prompt."""
+    tax = default_taxonomy()
+    paths = tax.all_paths()
+
+    assert "People" in paths
+    assert "Financial/Bills" in paths
+    assert "Financial/Bills/Receipts" in paths
+    # Per-person folders are part of the tree the model may choose from.
+    assert "People/Alpha" in paths
+    assert "People/Alpha/Medical" in paths
+    # No duplicates
+    assert len(paths) == len(set(paths))
+
+
+def test_all_paths_uses_custom_people(tmp_path):
+    tax = load_taxonomy(_write_custom_structure(tmp_path))
+    paths = tax.all_paths()
+    assert "Family/Wanda" in paths
+    assert "Family/Wanda/Health" in paths
+    assert "Money/Bank Statements" in paths
+
+
+def test_every_listed_path_is_accepted_by_the_validator(tmp_path):
+    """The model can never be asked to choose a path the validator rejects."""
+    for tax in (default_taxonomy(), load_taxonomy(_write_dynamic_structure(tmp_path))):
+        for path in tax.all_paths():
+            assert tax.is_valid_folder(path) is not None, path
+
+
+def test_is_valid_folder_accepts_person_subfolder():
+    tax = default_taxonomy()
+    assert tax.is_valid_folder("People/Alpha/Medical") == "People/Alpha/Medical"
+
+
+def test_is_valid_folder_rejects_unknown_person():
+    tax = default_taxonomy()
+    assert tax.is_valid_folder("People/Zeta/Medical") is None
+
+
+def test_is_valid_folder_rejects_path_traversal():
+    """'..' must never resolve to a folder outside the destination root."""
+    tax = default_taxonomy()
+    assert tax.is_valid_folder("Financial/../etc") is None
+    assert tax.is_valid_folder("Financial/Bills/..") is None
+    assert tax.is_valid_folder("../etc/passwd") is None
+
+
+def test_is_valid_folder_rejects_paths_deeper_than_the_tree():
+    tax = default_taxonomy()
+    assert tax.is_valid_folder("Financial/Bills/Receipts/Extra") is None
+
+
+def test_is_valid_folder_is_case_insensitive():
+    tax = default_taxonomy()
+    assert tax.is_valid_folder("financial/bills") == "Financial/Bills"
+    assert tax.is_valid_folder("PEOPLE/alpha") == "People/Alpha"
+
+
+def test_is_valid_folder_accepts_dynamic_component(tmp_path):
+    """A 'dynamic: true' folder accepts one new final component."""
+    tax = load_taxonomy(_write_dynamic_structure(tmp_path))
+    assert tax.is_valid_folder("Financial/Bills/Acme Corp") == "Financial/Bills/Acme_Corp"
+    # The display case the model chose is preserved (not lowercased).
+    assert tax.is_valid_folder("Financial/Bills/AcmeCorp") == "Financial/Bills/AcmeCorp"
+
+
+def test_is_valid_folder_rejects_dot_component_in_dynamic_folder(tmp_path):
+    tax = load_taxonomy(_write_dynamic_structure(tmp_path))
+    assert tax.is_valid_folder("Financial/Bills/..") is None
+    assert tax.is_valid_folder("Financial/Bills/.") is None
+
+
+def test_dynamic_paths_lists_dynamic_folders(tmp_path):
+    tax = load_taxonomy(_write_dynamic_structure(tmp_path))
+    assert tax.dynamic_paths() == ["Financial/Bills"]
+    # Folders that are not dynamic are not advertised as such.
+    assert "Financial/Misc" not in tax.dynamic_paths()
+
+
+def test_dynamic_paths_empty_for_default_taxonomy():
+    assert default_taxonomy().dynamic_paths() == []
+
+
+def test_taxonomy_to_yaml_emits_dynamic_flag(tmp_path):
+    tax = load_taxonomy(_write_dynamic_structure(tmp_path))
+    text = taxonomy_to_yaml(tax)
+    assert "dynamic: true" in text
+
+    # And the flag survives a round trip through the file.
+    structure = tmp_path / "roundtrip.yaml"
+    structure.write_text(text, encoding="utf-8")
+    assert load_taxonomy(structure).dynamic_paths() == ["Financial/Bills"]
+
+
+def test_sanitize_folder_name_rejects_dot_and_dotdot():
+    assert sanitize_folder_name("..") == ""
+    assert sanitize_folder_name(".") == ""
+    assert sanitize_folder_name("Acme Corp") == "Acme_Corp"
+
+
+def test_dynamic_taxonomy_grandchildren_still_win_over_dynamic_component(tmp_path):
+    """A declared grandchild is preferred over inventing a new folder."""
+    tax = load_taxonomy(_write_dynamic_structure(tmp_path))
+    assert tax.is_valid_folder("Financial/Bills/Receipts") == "Financial/Bills/Receipts"
+
+
+def test_custom_taxonomy_is_valid_folder_unknown_root():
+    tax = Taxonomy(roots=["Financial"], children={"Financial": ["Bills"]})
+    assert tax.is_valid_folder("Legal/Court") is None
+    assert tax.is_valid_folder("Financial/Bills") == "Financial/Bills"
 
 
 # ==============================================================================

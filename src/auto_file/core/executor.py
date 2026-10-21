@@ -82,6 +82,10 @@ class FilePipelineExecutor:
         exact_spelling: bool = False,
         structure: Path | str | None = None,
         llm_server: dict[str, Any] | None = None,
+        llm_backend: str | None = None,
+        llm_model: str | None = None,
+        min_understanding_words: int = 25,
+        min_understanding_chars: int = 120,
     ) -> None:
         """Initialize the pipeline executor.
 
@@ -100,17 +104,43 @@ class FilePipelineExecutor:
                 binary, model, mmproj, port, idle_seconds). Spawns the server
                 only while documents are being understood and stops it after
                 idling — no standing network service.
+            llm_backend: Optional explicit backend ('llama.cpp', 'transformers'
+                or 'none'). When omitted the backend is inferred from the
+                configuration; the transformers backend is never selected
+                implicitly because it needs multi-gigabyte local weights.
+            llm_model: Optional model identifier (Hugging Face id for the
+                transformers backend, ignored for llama.cpp).
+            min_understanding_words: Minimum words of readable text before a
+                document counts as understood.
+            min_understanding_chars: Minimum characters of readable text before
+                a document counts as understood.
         """
         self.target_root = Path(target_root)
         self.audit_ledger = audit_ledger
         self.dispatcher = dispatcher or LayaDispatcher(model_path=laya_model_path)
-        self.understander = understander or GemmaUnderstander(llama_server=llm_server)
+        self.understander = understander or GemmaUnderstander(
+            model_id=llm_model or "google/gemma-4-E2B-it",
+            llama_server=llm_server,
+            backend=llm_backend,
+            min_understanding_words=min_understanding_words,
+            min_understanding_chars=min_understanding_chars,
+        )
         if router is not None:
             self.router = router
         elif structure is not None:
             self.router = TaxonomyRouter(taxonomy=load_taxonomy(structure))
         else:
             self.router = TaxonomyRouter(model_path=laya_model_path, exact_spelling=exact_spelling)
+
+    def shutdown(self) -> None:
+        """Release resources held by the pipeline (e.g. the on-demand LLM server).
+
+        Safe to call more than once; the on-demand llama-server is stopped so
+        no model server is left running after a one-shot command.
+        """
+        shutdown = getattr(self.understander, "shutdown_server", None)
+        if callable(shutdown):
+            shutdown()
 
     def _needs_review_result(
         self,
@@ -161,7 +191,9 @@ class FilePipelineExecutor:
             status="needs_review",
             original_path=orig_path,
             destination_path=orig_path,
-            proposed_relative_path=Path("_needs_review") / orig_path.name,
+            # The file stays exactly where it is: report its current name, not
+            # a destination it is never going to reach.
+            proposed_relative_path=Path(orig_path.name),
             details=details,
         )
 
@@ -171,6 +203,7 @@ class FilePipelineExecutor:
         dry_run: bool = False,
         run_id: str | None = None,
         raise_on_error: bool = False,
+        force: bool = False,
     ) -> PipelineResult:
         """Process a single file through the full organization pipeline.
 
@@ -181,6 +214,8 @@ class FilePipelineExecutor:
             run_id: Optional existing run_id to group audit events under.
             raise_on_error: If True, raises exceptions encountered during processing;
                 if False, returns PipelineResult with status='failed'.
+            force: If True, sort the file even when the understander could not
+                confidently read it (skips the needs_review gate).
 
         Returns:
             PipelineResult indicating outcome and metadata.
@@ -211,7 +246,7 @@ class FilePipelineExecutor:
             # 4.5 Understanding gate: when the understander could not
             # confidently read the document, leave it untouched in the inbox
             # for manual review instead of renaming it into a generic folder.
-            if not getattr(understanding, "understood", True):
+            if not force and not getattr(understanding, "understood", True):
                 return self._needs_review_result(
                     orig_path, metadata, tool_name, "insufficient_understanding", dry_run, run_id
                 )
@@ -220,6 +255,7 @@ class FilePipelineExecutor:
             # when available; the keyword router is the no-LLM fallback. An
             # LLM that cannot pick a fitting folder gates to needs_review
             # rather than guessing.
+            routing_source = "rules"
             if self.understander.has_llm_routing:
                 status, chosen = self.understander.route_with_llama(
                     filename=orig_path.name,
@@ -227,6 +263,7 @@ class FilePipelineExecutor:
                     description=understanding.file_description,
                     content_date=understanding.content_date,
                     folder_choices=self.router.taxonomy.all_paths(),
+                    dynamic_folders=self.router.taxonomy.dynamic_paths(),
                 )
                 if status == "ok":
                     canonical = self.router.taxonomy.is_valid_folder(chosen or "")
@@ -235,6 +272,7 @@ class FilePipelineExecutor:
                             orig_path, metadata, tool_name, "llm_invalid_folder", dry_run, run_id
                         )
                     relative_folder = Path(canonical)
+                    routing_source = "llm"
                 elif status == "unreachable":
                     relative_folder = self.router.resolve_destination(
                         entities=understanding.detected_entities,
@@ -293,6 +331,7 @@ class FilePipelineExecutor:
                 "detected_entities": understanding.detected_entities,
                 "summary": understanding.summary,
                 "relative_folder": str(relative_folder),
+                "routing_source": routing_source,
                 "is_duplicate": resolved.is_duplicate,
                 "dry_run": dry_run,
             }
@@ -320,7 +359,7 @@ class FilePipelineExecutor:
                         date_value=date_val,
                         description=understanding.file_description,
                         laya_tool_selected=tool_name,
-                        laya_category_selected=str(relative_folder),
+                        laya_category_selected=f"{routing_source}:{relative_folder}",
                         status="duplicate_skipped",
                     )
                     details["audit_event_id"] = event_id
@@ -386,7 +425,7 @@ class FilePipelineExecutor:
                     date_value=date_val,
                     description=understanding.file_description,
                     laya_tool_selected=tool_name,
-                    laya_category_selected=str(relative_folder),
+                    laya_category_selected=f"{routing_source}:{relative_folder}",
                     status="moved",
                 )
                 details["audit_event_id"] = event_id
@@ -458,6 +497,7 @@ class FilePipelineExecutor:
         dry_run: bool = False,
         recursive: bool = False,
         run_id: str | None = None,
+        force: bool = False,
     ) -> list[PipelineResult]:
         """Process a directory of files in batch mode.
 
@@ -466,6 +506,8 @@ class FilePipelineExecutor:
             dry_run: If True, previews proposed file movements without modifying disk.
             recursive: If True, traverses subdirectories recursively.
             run_id: Optional existing run_id to group audit events under.
+            force: If True, sort files even when the understander could not
+                confidently read them (skips the needs_review gate).
 
         Returns:
             List of PipelineResult objects for each file processed.
@@ -511,6 +553,7 @@ class FilePipelineExecutor:
                 file_path=file_path,
                 dry_run=dry_run,
                 run_id=active_run_id,
+                force=force,
             )
             results.append(res)
 

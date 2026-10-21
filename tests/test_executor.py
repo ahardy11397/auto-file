@@ -506,6 +506,27 @@ def test_pipeline_dry_run_reports_needs_review(tmp_path: Path):
     assert test_file.exists()
 
 
+def test_pipeline_needs_review_counts_as_handled_in_the_ledger(tmp_path: Path):
+    """A file left for review was handled safely, not failed."""
+    source_dir = tmp_path / "inbox"
+    source_dir.mkdir()
+    target_dir = tmp_path / "sorted"
+    target_dir.mkdir()
+
+    test_file = source_dir / "unknown_scan.txt"
+    test_file.write_text("hi", encoding="utf-8")
+
+    ledger = AuditLedger(tmp_path / "audit.db")
+    executor = FilePipelineExecutor(target_root=target_dir, audit_ledger=ledger)
+    executor.process_directory(source_dir, dry_run=False)
+
+    history = ledger.get_history()
+    assert len(history) == 1
+    assert history[0]["total_files"] == 1
+    assert history[0]["successful_files"] == 1
+    assert history[0]["failed_files"] == 0
+
+
 def test_pipeline_moves_when_understanding_is_specific(tmp_path: Path):
     """Specific category from real content passes the gate."""
     source_dir = tmp_path / "inbox"
@@ -540,6 +561,7 @@ class _RoutingStubUnderstander:
         self._folder = folder
         self.has_llm_routing = True
         self.last_choices: list[str] | None = None
+        self.last_dynamic: list[str] | None = None
 
     def understand(self, content, filename_hint=None):
         return UnderstandingResult(
@@ -551,8 +573,18 @@ class _RoutingStubUnderstander:
             understood=True,
         )
 
-    def route_with_llama(self, filename, summary, description, content_date, folder_choices, url=None):
+    def route_with_llama(
+        self,
+        filename,
+        summary,
+        description,
+        content_date,
+        folder_choices,
+        url=None,
+        dynamic_folders=None,
+    ):
         self.last_choices = list(folder_choices)
+        self.last_dynamic = list(dynamic_folders or [])
         return self._status, self._folder
 
 

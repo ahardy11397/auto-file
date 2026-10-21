@@ -47,45 +47,50 @@ name = "auto-file"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "accelerate" },
-    { name = "bitsandbytes" },
     { name = "mutagen" },
     { name = "pillow" },
-    { name = "protobuf" },
     { name = "puremagic" },
     { name = "pypdf" },
     { name = "pypdfium2" },
     { name = "pytest" },
     { name = "pyyaml" },
     { name = "rich" },
-    { name = "sentencepiece" },
-    { name = "torch" },
-    { name = "torchvision" },
-    { name = "transformers" },
     { name = "typer" },
     { name = "watchdog" },
 ]
 
+[package.optional-dependencies]
+llm = [
+    { name = "accelerate" },
+    { name = "bitsandbytes" },
+    { name = "protobuf" },
+    { name = "sentencepiece" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "transformers" },
+]
+
 [package.metadata]
 requires-dist = [
-    { name = "accelerate" },
-    { name = "bitsandbytes", specifier = ">=0.45" },
+    { name = "accelerate", marker = "extra == 'llm'" },
+    { name = "bitsandbytes", marker = "extra == 'llm'", specifier = ">=0.45" },
     { name = "mutagen", specifier = ">=1.48.1" },
     { name = "pillow" },
-    { name = "protobuf" },
+    { name = "protobuf", marker = "extra == 'llm'" },
     { name = "puremagic" },
     { name = "pypdf" },
     { name = "pypdfium2", specifier = ">=5.14.0" },
     { name = "pytest" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich" },
-    { name = "sentencepiece" },
-    { name = "torch", specifier = "==2.6.0" },
-    { name = "torchvision", specifier = "==0.21.0" },
-    { name = "transformers", specifier = ">=5.0" },
+    { name = "sentencepiece", marker = "extra == 'llm'" },
+    { name = "torch", marker = "extra == 'llm'", specifier = "==2.6.0" },
+    { name = "torchvision", marker = "extra == 'llm'", specifier = "==0.21.0" },
+    { name = "transformers", marker = "extra == 'llm'", specifier = ">=5.0" },
     { name = "typer" },
     { name = "watchdog" },
 ]
+provides-extras = ["llm"]
 
 [[package]]
 name = "bitsandbytes"

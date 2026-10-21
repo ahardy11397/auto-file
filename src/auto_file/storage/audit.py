@@ -173,6 +173,8 @@ class AuditLedger:
             run_id: Run identifier to update.
             total_files: Total number of files processed.
             successful_files: Number of files successfully moved or skipped.
+                Files left for review (``needs_review``) count as successful:
+                they were handled safely, without a move.
             failed_files: Number of failed files.
         """
         completed_at = datetime.now(timezone.utc).isoformat()
@@ -184,7 +186,8 @@ class AuditLedger:
                     """
                     SELECT
                         COUNT(*),
-                        SUM(CASE WHEN status IN ('moved', 'duplicate_skipped') THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN status IN ('moved', 'duplicate_skipped', 'needs_review')
+                                 THEN 1 ELSE 0 END),
                         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END)
                     FROM file_events
                     WHERE run_id = ?

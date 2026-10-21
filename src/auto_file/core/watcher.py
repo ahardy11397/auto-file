@@ -70,6 +70,7 @@ class FolderWatcher:
         debounce_seconds: float = 2.0,
         recursive: bool = False,
         on_processed: Optional[Callable[[PipelineResult], None]] = None,
+        force: bool = False,
     ) -> None:
         """Initialize FolderWatcher.
 
@@ -79,6 +80,8 @@ class FolderWatcher:
             debounce_seconds: Seconds to wait after last modification before processing.
             recursive: If True, recursively monitors subdirectories.
             on_processed: Optional callback invoked with PipelineResult after file processing.
+            force: If True, sort files even when the understander could not
+                confidently read them (skips the needs_review gate).
         """
         self.inbox_dir = Path(inbox_dir).resolve()
         if not self.inbox_dir.exists():
@@ -90,6 +93,7 @@ class FolderWatcher:
         self.debounce_seconds = float(debounce_seconds)
         self.recursive = bool(recursive)
         self.on_processed = on_processed
+        self.force = bool(force)
 
         self._observer: Optional[Observer] = None
         self._worker_thread: Optional[threading.Thread] = None
@@ -239,7 +243,7 @@ class FolderWatcher:
         if not path.is_file():
             return None
         try:
-            result = self.executor.process_file(path)
+            result = self.executor.process_file(path, force=self.force)
             if self.on_processed:
                 try:
                     self.on_processed(result)

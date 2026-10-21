@@ -1,11 +1,14 @@
 """Tests for the Auto-File CLI interface."""
 
+import os
+import socket
 from pathlib import Path
 from unittest.mock import patch
 import pytest
 from typer.testing import CliRunner
 
 from auto_file.cli import app
+from auto_file.config import set_config_value
 from auto_file.storage.audit import AuditLedger
 
 runner = CliRunner()
@@ -383,4 +386,201 @@ def test_cli_sort_failure_displays_dash_in_table(tmp_path: Path):
     # Ensure '.' is not printed as the destination column in the table row
     # In table format: corrupt.txt | text_extractor | 2026-01-01 | - | failed
     assert "failed" in res.output
+
+
+# ==============================================================================
+# On-Demand LLM Server Lifecycle Tests
+# ==============================================================================
+
+
+FAKE_LLAMA_SERVER = '''#!/usr/bin/env python3
+"""A stand-in llama-server: serves /health and /v1/chat/completions."""
+import json
+import os
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+port = 8123
+args = sys.argv[1:]
+for i, arg in enumerate(args):
+    if arg == "--port" and i + 1 < len(args):
+        port = int(args[i + 1])
+
+pidfile = os.environ.get("FAKE_LLAMA_PIDFILE")
+if pidfile:
+    with open(pidfile, "w", encoding="utf-8") as handle:
+        handle.write(str(os.getpid()))
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _send(self, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self._send({"status": "ok"})
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length).decode("utf-8", "replace")
+        if "file-routing assistant" in raw:
+            content = json.dumps({"folder": "Financial/Bills"})
+        else:
+            content = json.dumps({
+                "content_date": "2026-01-05",
+                "file_description": "target_receipt",
+                "detected_entities": ["Target"],
+                "category_hint": "Receipt",
+                "summary": "Receipt from Target for $23.45.",
+            })
+        self._send({"choices": [{"message": {"content": content}}]})
+
+    def log_message(self, *args):
+        pass
+
+
+HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+'''
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _port_is_free(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+    return True
+
+
+def _install_fake_llama_server(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Write the fake server, a fake model file, and return their paths."""
+    binary = tmp_path / "llama-server"
+    binary.write_text(FAKE_LLAMA_SERVER, encoding="utf-8")
+    binary.chmod(0o755)
+    model = tmp_path / "gemma-test.gguf"
+    model.write_text("placeholder", encoding="utf-8")
+    pidfile = tmp_path / "server.pid"
+    return binary, model, pidfile
+
+
+def test_cli_sort_leaves_no_llama_server_running(tmp_path: Path, monkeypatch):
+    """A one-shot sort must not leave the model server running.
+
+    The server is started on demand, so a command that exits without
+    stopping it would leave a multi-gigabyte model server behind forever.
+    """
+    # The suite forces the deterministic understander; this test needs the
+    # real LLM path so the server is actually started.
+    monkeypatch.delenv("AUTO_FILE_UNDERSTANDER", raising=False)
+
+    binary, model, pidfile = _install_fake_llama_server(tmp_path)
+    monkeypatch.setenv("FAKE_LLAMA_PIDFILE", str(pidfile))
+
+    port = _free_port()
+    cfg = tmp_path / "config.json"
+    set_config_value("llm_backend", "llama.cpp", cfg)
+    set_config_value("llm_model", str(model), cfg)
+    set_config_value("llm_binary", str(binary), cfg)
+    set_config_value("llm_port", str(port), cfg)
+    set_config_value("llm_idle_seconds", "900", cfg)
+
+    source = tmp_path / "receipt.txt"
+    source.write_text(
+        "Receipt from Target, purchase total $23.45, paid with card. "
+        "Thank you for shopping with us today.",
+        encoding="utf-8",
+    )
+    dest = tmp_path / "sorted"
+    audit_db = tmp_path / "audit.db"
+
+    result = runner.invoke(
+        app,
+        [
+            "sort", str(source),
+            "--dest", str(dest),
+            "--config-file", str(cfg),
+            "--audit-db", str(audit_db),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    # The LLM chose the destination from the real folder tree.
+    assert not source.exists()
+    assert (dest / "Financial" / "Bills").is_dir()
+
+    # The ledger records that the destination came from the LLM.
+    ledger = AuditLedger(audit_db)
+    events = ledger.get_recent_events(limit=5)
+    assert any(
+        e["status"] == "moved" and e["laya_category_selected"] == "llm:Financial/Bills"
+        for e in events
+    )
+
+    # The server was started (so the pidfile exists) and then stopped.
+    assert pidfile.is_file()
+    server_pid = int(pidfile.read_text().strip())
+    with pytest.raises(ProcessLookupError):
+        os.kill(server_pid, 0)
+    assert _port_is_free(port)
+
+
+def test_cli_sort_without_llm_config_uses_no_server(tmp_path: Path, monkeypatch):
+    """With no LLM configured, no model server is started at all."""
+    monkeypatch.delenv("AUTO_FILE_UNDERSTANDER", raising=False)
+
+    binary, model, pidfile = _install_fake_llama_server(tmp_path)
+    monkeypatch.setenv("FAKE_LLAMA_PIDFILE", str(pidfile))
+
+    cfg = tmp_path / "config.json"
+    source = tmp_path / "receipt.txt"
+    source.write_text(
+        "Receipt from Target, purchase total $23.45, paid with card. "
+        "Thank you for shopping with us today.",
+        encoding="utf-8",
+    )
+    dest = tmp_path / "sorted"
+
+    result = runner.invoke(
+        app,
+        ["sort", str(source), "--dest", str(dest), "--config-file", str(cfg)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert not pidfile.exists()
+
+
+def test_cli_sort_warns_when_llama_server_is_missing(tmp_path: Path):
+    """A configured but missing server degrades to heuristics with a warning."""
+    cfg = tmp_path / "config.json"
+    model = tmp_path / "gemma-test.gguf"
+    model.write_text("placeholder", encoding="utf-8")
+    set_config_value("llm_backend", "llama.cpp", cfg)
+    set_config_value("llm_model", str(model), cfg)
+    set_config_value("llm_binary", str(tmp_path / "no-such-llama-server"), cfg)
+
+    source = tmp_path / "receipt.txt"
+    source.write_text(
+        "Receipt from Target, purchase total $23.45, paid with card. "
+        "Thank you for shopping with us today.",
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        ["sort", str(source), "--dest", str(tmp_path / "sorted"), "--config-file", str(cfg)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "llama-server binary not found" in result.output
 

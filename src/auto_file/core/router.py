@@ -13,7 +13,6 @@ import logging
 from pathlib import Path
 import re
 from typing import Any
-import unicodedata
 
 from auto_file.core.taxonomy import (
     CANONICAL_PEOPLE,

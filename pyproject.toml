@@ -18,6 +18,13 @@ dependencies = [
     "mutagen>=1.48.1",
     "pypdfium2>=5.14.0",
     "pyyaml>=6.0",
+]
+
+# The in-process transformers backend needs multi-gigabyte local weights and
+# a CUDA-capable torch. It is opt-in: the default install stays small, and
+# the primary LLM path (llama.cpp) needs none of these.
+[project.optional-dependencies]
+llm = [
     "torch==2.6.0",
     "torchvision==0.21.0",
     "transformers>=5.0",

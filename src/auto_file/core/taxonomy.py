@@ -31,6 +31,7 @@ YAML schema (all keys optional unless noted)::
           Receipts:
             keywords: [reciept] # optional extra matching words for this child
           Bills:
+            dynamic: true       # optional: accepts one new final folder (Bills/<vendor>)
             subfolders: [Receipts, Due]
       Misc: {}                  # a root with no subfolders
 """
@@ -162,14 +163,46 @@ class Taxonomy:
         return None
 
     def all_paths(self) -> list[str]:
-        """Every folder path in the tree, as 'Root/Child/Grandchild' strings."""
+        """Every folder path in the tree, as 'Root/Child/Grandchild' strings.
+
+        This is the single source of truth for both the LLM prompt and
+        :meth:`is_valid_folder` — the model can never be asked to choose a
+        path the validator would reject.
+        """
+        out: list[str] = []
+        seen: set[str] = set()
+
+        def _add(path: str) -> None:
+            if path not in seen:
+                seen.add(path)
+                out.append(path)
+
+        for root in self.roots:
+            _add(root)
+            for child in self.children.get(root, []):
+                _add(f"{root}/{child}")
+                for grandchild in self.grandchildren.get(root, {}).get(child, []):
+                    _add(f"{root}/{child}/{grandchild}")
+
+        # Per-person folders: People/<person> and People/<person>/<subfolder>.
+        if self.person_root:
+            for person in self.people:
+                base = f"{self.person_root}/{person}"
+                _add(base)
+                for sub in self.person_subfolders:
+                    _add(f"{base}/{sub}")
+        return out
+
+    def dynamic_paths(self) -> list[str]:
+        """Folders that accept one new final component (e.g. 'Financial/Bills')."""
         out: list[str] = []
         for root in self.roots:
-            out.append(root)
+            dynamic = self.dynamic_children.get(child_key(root), set())
+            if not dynamic:
+                continue
             for child in self.children.get(root, []):
-                out.append(f"{root}/{child}")
-                for grandchild in self.grandchildren.get(root, {}).get(child, []):
-                    out.append(f"{root}/{child}/{grandchild}")
+                if child_key(child) in dynamic:
+                    out.append(f"{root}/{child}")
         return out
 
     def is_valid_folder(self, path: str) -> str | None:
@@ -179,7 +212,8 @@ class Taxonomy:
         (case/spacing-insensitive), allowing one dynamic final component
         under a folder marked 'dynamic: true'. Returns None when invalid.
         """
-        parts = [_norm(p) for p in path.split("/") if p.strip()]
+        raw_parts = [p.strip() for p in path.split("/") if p.strip()]
+        parts = [_norm(p) for p in raw_parts]
         if not parts:
             return None
         root = next((r for r in self.roots if _norm(r) == parts[0]), None)
@@ -200,9 +234,18 @@ class Taxonomy:
         )
         if grandchild is not None:
             return f"{root}/{child}/{grandchild}"
+        # Per-person subfolder: People/<person>/<subfolder>
+        if self.person_root and _norm(root) == _norm(self.person_root):
+            person = next((p for p in self.people if _norm(p) == parts[1]), None)
+            if person is not None:
+                sub = next((s for s in self.person_subfolders if _norm(s) == parts[2]), None)
+                if sub is not None:
+                    return f"{root}/{person}/{sub}"
         # Dynamic final component under a 'by entity' folder
         if child_key(child) in self.dynamic_children.get(child_key(root), set()):
-            entity = sanitize_folder_name(parts[2])
+            # Sanitize the raw component, not the normalized one, so the
+            # folder keeps the capitalization the model chose.
+            entity = sanitize_folder_name(raw_parts[2])
             if entity:
                 return f"{root}/{child}/{entity}"
         return None
@@ -265,7 +308,11 @@ def sanitize_folder_name(name: str) -> str:
     text = text.encode("ascii", "ignore").decode("ascii")
     text = re.sub(r"[^\w\-.]+", "_", text)
     text = re.sub(r"_+", "_", text)
-    return text.strip("_")
+    text = text.strip("_")
+    # "." and ".." would move the file out of the chosen folder.
+    if text in {".", ".."}:
+        return ""
+    return text
 
 
 def child_key(name: str) -> str:
@@ -481,12 +528,20 @@ def taxonomy_to_yaml(taxonomy: Taxonomy | None = None) -> str:
     lines.append("# Optional 'keywords' add extra words that route files there.")
     lines.append("roots:")
 
-    def _emit(name: str, depth: int, subfolders: list[str], keywords: list[str]) -> None:
+    def _emit(
+        name: str,
+        depth: int,
+        subfolders: list[str],
+        keywords: list[str],
+        dynamic: bool = False,
+    ) -> None:
         indent = "  " * depth
-        if subfolders or keywords:
+        if subfolders or keywords or dynamic:
             lines.append(f"{indent}{name}:")
             if keywords:
                 lines.append(f"{indent}  keywords: [{', '.join(keywords)}]")
+            if dynamic:
+                lines.append(f"{indent}  dynamic: true")
             if subfolders:
                 lines.append(f"{indent}  subfolders:")
                 for sub in subfolders:
@@ -498,6 +553,7 @@ def taxonomy_to_yaml(taxonomy: Taxonomy | None = None) -> str:
         root_kws = tax.root_keywords.get(root, [])
         role = tax.roles.get(root)
         kids = tax.children.get(root, [])
+        dynamic_kids = tax.dynamic_children.get(child_key(root), set())
         if kids or root_kws or role:
             lines.append(f"  {root}:")
             if role:
@@ -512,6 +568,7 @@ def taxonomy_to_yaml(taxonomy: Taxonomy | None = None) -> str:
                         3,
                         tax.grandchildren.get(root, {}).get(kid, []),
                         tax.child_keywords.get(root, {}).get(kid, []),
+                        dynamic=child_key(kid) in dynamic_kids,
                     )
         else:
             lines.append(f"  {root}: []")

@@ -7,6 +7,7 @@ rolling back operations, and configuring default preferences.
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 import signal
 import time
 from typing import Any, Optional
@@ -42,23 +43,89 @@ console = Console()
 DEFAULT_STRUCTURE_FILE = Path.home() / ".config" / "auto-file" / "folder_structure.yaml"
 
 
-DEFAULT_LLM_MODEL = Path("/mnt/ssd/models/gemma-4-E2B/gemma-4-E2B_q4_0-it.gguf")
-DEFAULT_LLM_MMPROJ = Path("/mnt/ssd/models/gemma-4-E2B/gemma-4-E2B-it-mmproj.gguf")
-DEFAULT_LLM_BINARY = Path.home() / "backends/llama.cpp-build/build/bin/llama-server"
+def _default_llm_binary() -> str:
+    """Locate a llama-server binary: PATH first, then a local llama.cpp build."""
+    found = shutil.which("llama-server")
+    if found:
+        return found
+    return str(Path.home() / "backends" / "llama.cpp-build" / "build" / "bin" / "llama-server")
 
 
-def _llm_server_config(config_file: Path | None) -> dict[str, Any] | None:
-    """On-demand llama.cpp server config; None when no model is configured."""
-    model = get_config_value("llm_model", None, config_file)
-    if not model:
+def _guess_mmproj(model: str) -> str | None:
+    """Find the vision projector next to the model file, if there is one."""
+    model_dir = Path(model).expanduser().parent
+    if not model_dir.is_dir():
         return None
-    return {
-        "binary": str(get_config_value("llm_binary", str(DEFAULT_LLM_BINARY), config_file)),
+    candidates = sorted(model_dir.glob("*mmproj*.gguf"))
+    return str(candidates[0]) if len(candidates) == 1 else None
+
+
+def _llm_settings(config_file: Path | None) -> dict[str, Any]:
+    """Resolve the LLM configuration from the config file.
+
+    Returns a dict with:
+      backend  — 'llama.cpp', 'transformers' or 'none'
+      server   — on-demand llama.cpp server config (llama.cpp backend only)
+      model    — model identifier (transformers backend only)
+      warnings — human-readable problems with the configuration
+    """
+    warnings: list[str] = []
+
+    backend = str(get_config_value("llm_backend", "", config_file) or "").strip().lower()
+    model = get_config_value("llm_model", None, config_file)
+
+    if not backend:
+        backend = "llama.cpp" if model else "none"
+
+    if backend == "none":
+        return {"backend": "none", "server": None, "model": None, "warnings": warnings}
+
+    if backend == "transformers":
+        return {
+            "backend": "transformers",
+            "server": None,
+            "model": str(model) if model else "google/gemma-4-E2B-it",
+            "warnings": warnings,
+        }
+
+    if backend != "llama.cpp":
+        warnings.append(
+            f"Unknown llm_backend '{backend}' (expected llama.cpp, transformers or none); "
+            "falling back to no LLM."
+        )
+        return {"backend": "none", "server": None, "model": None, "warnings": warnings}
+
+    if not model:
+        warnings.append("llm_backend is 'llama.cpp' but no llm_model is configured; using no LLM.")
+        return {"backend": "none", "server": None, "model": None, "warnings": warnings}
+
+    binary = str(get_config_value("llm_binary", None, config_file) or _default_llm_binary())
+    mmproj = get_config_value("llm_mmproj", None, config_file)
+    if not mmproj:
+        mmproj = _guess_mmproj(str(model))
+
+    if not Path(binary).expanduser().is_file():
+        warnings.append(
+            f"llama-server binary not found at {binary}; using deterministic heuristics instead."
+        )
+        return {"backend": "none", "server": None, "model": None, "warnings": warnings}
+    if not Path(str(model)).expanduser().is_file():
+        warnings.append(f"LLM model file not found at {model}; using deterministic heuristics instead.")
+        return {"backend": "none", "server": None, "model": None, "warnings": warnings}
+    if mmproj and not Path(str(mmproj)).expanduser().is_file():
+        warnings.append(
+            f"Vision projector not found at {mmproj}; the server will run without vision support."
+        )
+        mmproj = None
+
+    server = {
+        "binary": binary,
         "model": str(model),
-        "mmproj": str(get_config_value("llm_mmproj", str(DEFAULT_LLM_MMPROJ), config_file)),
+        "mmproj": str(mmproj) if mmproj else None,
         "port": int(get_config_value("llm_port", 8082, config_file)),
-        "idle_seconds": int(get_config_value("llm_idle_seconds", 300, config_file)),
+        "idle_seconds": int(get_config_value("llm_idle_seconds", 900, config_file)),
     }
+    return {"backend": "llama.cpp", "server": server, "model": None, "warnings": warnings}
 
 
 def _resolved_structure(config_file: Path | None) -> Path | None:
@@ -128,6 +195,11 @@ def sort(
         "--config-file",
         help="Path to custom config JSON file.",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Sort files even when they could not be confidently understood.",
+    ),
 ) -> None:
     """Sort and organize a single file or an entire directory."""
     source_path = path or get_default_source(config_file)
@@ -152,25 +224,41 @@ def sort(
 
     resolved_audit_db = get_audit_db_path(config_file, audit_db)
     ledger = AuditLedger(resolved_audit_db)
+    llm = _llm_settings(config_file)
+    for warning in llm["warnings"]:
+        console.print(f"[yellow]Warning: {warning}[/yellow]")
     executor = FilePipelineExecutor(
         target_root=target_dest,
         audit_ledger=ledger,
         structure=_resolved_structure(config_file),
-        llm_server=_llm_server_config(config_file),
+        llm_server=llm["server"],
+        llm_backend=llm["backend"],
+        llm_model=llm["model"],
+        min_understanding_words=int(
+            get_config_value("min_understanding_words", 25, config_file)
+        ),
+        min_understanding_chars=int(
+            get_config_value("min_understanding_chars", 120, config_file)
+        ),
     )
 
-    results: list[PipelineResult] = []
-    if source_path.is_file():
-        results = [executor.process_file(source_path, dry_run=dry_run)]
-    elif source_path.is_dir():
-        results = executor.process_directory(
-            source_path,
-            dry_run=dry_run,
-            recursive=recursive,
-        )
-    else:
-        console.print(f"[red]Error: Unsupported file path type: {source_path}[/red]")
-        raise typer.Exit(code=1)
+    try:
+        results: list[PipelineResult] = []
+        if source_path.is_file():
+            results = [executor.process_file(source_path, dry_run=dry_run, force=force)]
+        elif source_path.is_dir():
+            results = executor.process_directory(
+                source_path,
+                dry_run=dry_run,
+                recursive=recursive,
+                force=force,
+            )
+        else:
+            console.print(f"[red]Error: Unsupported file path type: {source_path}[/red]")
+            raise typer.Exit(code=1)
+    finally:
+        # Never leave a model server running after a one-shot command.
+        executor.shutdown()
 
     table = Table(
         title="Auto-File Organization Summary" if not dry_run else "Auto-File Organization Preview",
@@ -198,7 +286,13 @@ def sort(
         else:
             status_style = res.status
 
-        proposed_dest = "-" if res.status == "failed" else str(res.proposed_relative_path)
+        if status_lower == "failed":
+            proposed_dest = "-"
+        elif status_lower == "needs_review":
+            # The file was left untouched in the inbox.
+            proposed_dest = "[dim]left in inbox[/dim]"
+        else:
+            proposed_dest = str(res.proposed_relative_path)
 
         table.add_row(
             res.original_path.name,
@@ -586,6 +680,11 @@ def watch(
         "--config-file",
         help="Path to custom config JSON file.",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Sort files even when they could not be confidently understood.",
+    ),
 ) -> None:
     """Watch an inbox directory continuously and organize incoming files automatically."""
     resolved_inbox = inbox_dir or get_default_source(config_file)
@@ -615,11 +714,22 @@ def watch(
     resolved_audit_db = get_audit_db_path(config_file, audit_db)
     ledger = AuditLedger(resolved_audit_db)
     structure_path = _resolved_structure(config_file)
+    llm = _llm_settings(config_file)
+    for warning in llm["warnings"]:
+        console.print(f"[yellow]Warning: {warning}[/yellow]")
     executor = FilePipelineExecutor(
         target_root=target_dest,
         audit_ledger=ledger,
         structure=structure_path,
-        llm_server=_llm_server_config(config_file),
+        llm_server=llm["server"],
+        llm_backend=llm["backend"],
+        llm_model=llm["model"],
+        min_understanding_words=int(
+            get_config_value("min_understanding_words", 25, config_file)
+        ),
+        min_understanding_chars=int(
+            get_config_value("min_understanding_chars", 120, config_file)
+        ),
     )
 
     def _on_file_processed(res: PipelineResult) -> None:
@@ -635,9 +745,13 @@ def watch(
         else:
             status_style = res.status
 
+        if status_lower == "needs_review":
+            destination = "[dim]left in inbox[/dim]"
+        else:
+            destination = f"[blue]{res.proposed_relative_path}[/blue]"
         console.print(
             f"[bold cyan]Auto-Organized:[/bold cyan] {res.original_path.name} -> "
-            f"[blue]{res.proposed_relative_path}[/blue] ({status_style})"
+            f"{destination} ({status_style})"
         )
 
     watcher = FolderWatcher(
@@ -646,6 +760,7 @@ def watch(
         debounce_seconds=debounce,
         recursive=recursive,
         on_processed=_on_file_processed,
+        force=force,
     )
 
     console.print(
@@ -671,6 +786,8 @@ def watch(
         console.print("\n[yellow]Stopping watcher daemon...[/yellow]")
     finally:
         watcher.stop()
+        # Never leave a model server running after the watcher stops.
+        executor.shutdown()
         console.print("[green]Watcher stopped cleanly.[/green]")
 
 

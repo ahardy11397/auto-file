@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
 import json
@@ -337,6 +338,38 @@ def _clean_json_string(raw: str) -> str:
     return cleaned
 
 
+def _has_structured_json(raw_output: str) -> bool:
+    """True when the model answered with a parseable JSON object."""
+    cleaned = _clean_json_string(raw_output or "")
+    if not (cleaned.startswith("{") and cleaned.endswith("}")):
+        return False
+    try:
+        return isinstance(json.loads(cleaned), dict)
+    except Exception:
+        return False
+
+
+def _is_informative(result: UnderstandingResult, raw_output: str) -> bool:
+    """True when the model produced an answer worth acting on.
+
+    Only a structured JSON answer counts. The heuristic parser can merely
+    echo the model's words back, so a model that refused or babbled has not
+    understood the document — those files go to review instead of being
+    renamed into a generic folder.
+
+    A generic category ('Misc') is *not* treated as a failure: the prompt
+    offers it as a valid answer, and the description or summary still tells
+    us the model read something.
+    """
+    if not _has_structured_json(raw_output):
+        return False
+    description = (result.file_description or "").strip().lower()
+    summary = (result.summary or "").strip()
+    if description and description != "document":
+        return True
+    return len(summary) >= 15
+
+
 def parse_llm_json_response(raw_output: str) -> UnderstandingResult:
     """Parse raw LLM generation into a structured UnderstandingResult.
 
@@ -457,8 +490,10 @@ def _load_transformer_model(
     """Load Hugging Face transformers model and processor with 4-bit quantization.
 
     Falls back to CPU loading if CUDA is unavailable or out-of-memory.
-    Passes local_files_only=True to prevent remote network attempts, with
-    graceful fallback if offline or local files are missing.
+    Only ever loads from the local Hugging Face cache: ``local_files_only=True``
+    is passed unconditionally so auto-file never reaches out to a model hub —
+    the tool promises that nothing leaves the machine, and a silent ~10 GB
+    download would break both that promise and the offline contract.
     """
     import torch
     try:
@@ -477,15 +512,7 @@ def _load_transformer_model(
     )
 
     def _from_pretrained(loader_cls: Any, **kwargs: Any) -> Any:
-        try:
-            return loader_cls.from_pretrained(model_id, local_files_only=True, **kwargs)
-        except (OSError, ValueError) as exc:
-            logger.debug(
-                "Loading %s with local_files_only=True failed (%s); attempting standard load",
-                loader_cls,
-                exc,
-            )
-            return loader_cls.from_pretrained(model_id, **kwargs)
+        return loader_cls.from_pretrained(model_id, local_files_only=True, **kwargs)
 
     if torch.cuda.is_available() and device != "cpu":
         try:
@@ -522,6 +549,11 @@ class LlamaServerManager:
     understanding, and shuts it down after an idle timeout — so there is no
     standing network service. Single-flight by design (the watcher processes
     one file at a time).
+
+    The manager owns the server it starts: it records the child PID in a
+    port-scoped pidfile and only ever signals a process it can prove is the
+    llama-server it spawned (checked via ``/proc/<pid>/cmdline``). A recycled
+    or foreign PID in the pidfile is ignored, never killed.
     """
 
     def __init__(
@@ -530,7 +562,7 @@ class LlamaServerManager:
         model: str,
         mmproj: str | None = None,
         port: int = 8082,
-        idle_seconds: int = 300,
+        idle_seconds: int = 900,
         start_timeout: int = 900,
     ) -> None:
         self.binary = str(Path(binary).expanduser())
@@ -544,16 +576,69 @@ class LlamaServerManager:
         self._idle_timer: threading.Timer | None = None
         self._lock = threading.Lock()
         self._in_flight = 0
-        self._pidfile = Path.home() / ".local" / "state" / "auto-file" / "llama-server.pid"
+        self._available = False
+        self._unavailable_reason = "not started"
+        # One pidfile per port: two managers on different ports must not
+        # fight over the same file.
+        self._pidfile = (
+            Path.home() / ".local" / "state" / "auto-file" / f"llama-server-{self.port}.pid"
+        )
+        # Never leave a multi-GB model server running after this process exits.
+        atexit.register(self.shutdown)
+
+    # -- process ownership ------------------------------------------------
+
+    def _process_cmdline(self, pid: int) -> str:
+        """Return the command line of ``pid`` (empty when it is gone)."""
+        try:
+            raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+        except OSError:
+            return ""
+        return raw.replace(b"\0", b" ").decode("utf-8", errors="replace")
+
+    def _owns_process(self, pid: int) -> bool:
+        """True when ``pid`` is the llama-server this manager spawned.
+
+        A PID on its own proves nothing: after a reboot the OS recycles PIDs,
+        so the pidfile may name an unrelated program. Only a process whose
+        command line carries our binary *and* our model is ours to signal.
+        """
+        cmdline = self._process_cmdline(pid)
+        if not cmdline:
+            return False
+        binary_name = Path(self.binary).name
+        model_name = Path(self.model).name
+        if binary_name and binary_name not in cmdline:
+            return False
+        if model_name and model_name not in cmdline:
+            return False
+        return True
 
     def _pidfile_pid(self) -> int | None:
-        """Return the pid of a server we previously spawned, if still alive."""
+        """Return the pid of a llama-server we previously spawned, if still ours."""
         try:
             pid = int(self._pidfile.read_text().strip())
-            Path(f"/proc/{pid}").resolve()  # raises if gone
-            return pid
         except (OSError, ValueError):
             return None
+        if pid <= 0:
+            return None
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except PermissionError:
+            # Alive, but not ours to signal — ownership check below decides.
+            pass
+        except OSError:
+            return None
+        if not self._owns_process(pid):
+            logger.warning(
+                "Ignoring pid %s in %s: it is not the llama-server we started",
+                pid,
+                self._pidfile,
+            )
+            return None
+        return pid
 
     def _write_pidfile(self, pid: int) -> None:
         try:
@@ -571,19 +656,45 @@ class LlamaServerManager:
     def _kill_stale_orphan(self) -> None:
         """Kill a leftover llama-server we spawned earlier (tracked by pidfile)."""
         pid = self._pidfile_pid()
-        if pid is not None:
-            logger.warning("Killing stale llama-server orphan (pid %s)", pid)
-            try:
-                os.kill(pid, 9)
-            except OSError:
-                pass
+        if pid is None:
+            # Stale or recycled pid: drop the pidfile, never signal the pid.
             self._clear_pidfile()
-            time.sleep(1)
+            return
+        logger.warning("Killing stale llama-server orphan (pid %s)", pid)
+        try:
+            os.kill(pid, 15)
+        except OSError:
+            pass
+        time.sleep(1)
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+        self._clear_pidfile()
+
+    # -- availability ------------------------------------------------------
+
+    @property
+    def available(self) -> bool:
+        """True when a server we manage is running and reachable."""
+        with self._lock:
+            return self._available
+
+    @property
+    def unavailable_reason(self) -> str:
+        """Why the server is unavailable (empty when it is available)."""
+        with self._lock:
+            return self._unavailable_reason
+
+    def _set_available(self, available: bool, reason: str = "") -> None:
+        self._available = available
+        self._unavailable_reason = "" if available else reason
 
     def _healthy(self) -> bool:
         try:
             with urllib.request.urlopen(f"{self.url}/health", timeout=3) as resp:
-                return b"ok" in resp.read()
+                status = getattr(resp, "status", 200)
+                return status == 200 and b"ok" in resp.read().lower()
         except Exception:
             return False
 
@@ -595,10 +706,14 @@ class LlamaServerManager:
                 # so its idle shutdown can still stop it later.
                 if self._pidfile_pid() is not None or self._proc is not None:
                     self._reset_idle_timer()
+                    self._set_available(True)
                     return True
                 # Healthy but untracked — we cannot manage its lifecycle
                 # safely; treat as unavailable rather than leave it standing.
                 logger.warning("Port %s is served by an untracked llama-server; not adopting", self.port)
+                self._set_available(
+                    False, f"port {self.port} is served by a server this tool does not own"
+                )
                 return False
 
             # A previous spawn may have outlived its manager (crash, race):
@@ -638,6 +753,7 @@ class LlamaServerManager:
                 self._write_pidfile(self._proc.pid)
             except OSError as exc:
                 logger.warning("Could not spawn llama-server (%s); using deterministic fallback", exc)
+                self._set_available(False, f"could not start llama-server: {exc}")
                 return False
 
             deadline = time.time() + self.start_timeout
@@ -645,10 +761,12 @@ class LlamaServerManager:
                 if self._proc.poll() is not None:
                     logger.warning("llama-server exited during startup (code %s)", self._proc.returncode)
                     self._proc = None
+                    self._set_available(False, "llama-server exited during startup")
                     return False
                 if self._healthy():
                     logger.info("llama-server started on %s", self.url)
                     self._reset_idle_timer()
+                    self._set_available(True)
                     return True
                 # Model loads can take minutes on a busy disk; wait as long as
                 # the server process itself is alive. Hard-stop well past any
@@ -656,6 +774,7 @@ class LlamaServerManager:
                 if time.time() > deadline and deadline > 0:
                     logger.warning("llama-server still loading after %ss; giving up", self.start_timeout)
                     self._stop_locked()
+                    self._set_available(False, "llama-server did not become ready in time")
                     return False
                 time.sleep(2)
 
@@ -705,6 +824,7 @@ class LlamaServerManager:
                 proc.kill()
         if proc is None and pid is not None:
             # Spawned by a previous manager instance that died before cleanup.
+            # _pidfile_pid only returns a process we can prove we started.
             try:
                 os.kill(pid, 15)
                 time.sleep(2)
@@ -713,8 +833,10 @@ class LlamaServerManager:
                 pass
         self._proc = None
         self._clear_pidfile()
+        self._set_available(False, "server stopped")
 
     def shutdown(self) -> None:
+        """Stop the server. Safe to call more than once."""
         with self._lock:
             self._stop_locked()
 
@@ -726,7 +848,21 @@ class GemmaUnderstander:
     descriptive filename slugs, detected entities, category hints, and summaries.
     Supports lazy model loading, 4-bit BitsAndBytes quantization, CPU fallback
     on CUDA OOM, and a built-in deterministic/mock mode for fast offline testing.
+
+    Three backends are available and exactly one is used per run:
+
+    - ``llama.cpp`` — the packaged Gemma server (on-demand or external URL).
+      Primary path: fast on CPU and able to read scanned page images.
+    - ``transformers`` — in-process model. Opt-in only: it needs the model
+      weights already in the local Hugging Face cache, because auto-file never
+      downloads anything.
+    - ``none`` — deterministic heuristics only. The default when no LLM is
+      configured, so a fresh install stays fast and fully offline.
     """
+
+    BACKEND_LLAMA = "llama.cpp"
+    BACKEND_TRANSFORMERS = "transformers"
+    BACKEND_NONE = "none"
 
     def __init__(
         self,
@@ -737,6 +873,9 @@ class GemmaUnderstander:
         mock_handler: Any = None,
         llama_url: str | None = None,
         llama_server: dict[str, Any] | None = None,
+        backend: str | None = None,
+        min_understanding_words: int = 25,
+        min_understanding_chars: int = 120,
     ) -> None:
         """Initialize Gemma understander.
 
@@ -759,6 +898,14 @@ class GemmaUnderstander:
                 'binary', 'model', 'mmproj', 'port', 'idle_seconds'. When set,
                 llama-server is spawned for the duration of a sorting batch and
                 shut down after the idle timeout — no standing network service.
+            backend: One of 'llama.cpp', 'transformers', 'none'. When None, the
+                backend is inferred: llama.cpp if a server is configured,
+                otherwise 'none' (deterministic heuristics). The transformers
+                backend is never selected implicitly — it must be asked for.
+            min_understanding_words: Minimum words of readable text before a
+                document counts as understood (deterministic path).
+            min_understanding_chars: Minimum characters of readable text before a
+                document counts as understood (deterministic path).
         """
         self.model_id = model_id
         self.mock = mock
@@ -767,6 +914,20 @@ class GemmaUnderstander:
         self.mock_handler = mock_handler
         self.llama_url = (llama_url or "").rstrip("/") or None
         self._server_mgr = LlamaServerManager(**llama_server) if llama_server else None
+        self.min_understanding_words = int(min_understanding_words)
+        self.min_understanding_chars = int(min_understanding_chars)
+
+        if backend:
+            self.backend = str(backend).strip().lower()
+        elif self._server_mgr is not None or self.llama_url:
+            self.backend = self.BACKEND_LLAMA
+        else:
+            self.backend = self.BACKEND_NONE
+
+        # Single flag consulted by both the understanding and the routing path,
+        # so a file is never half-understood by the LLM and half-routed by the
+        # keyword router (or the other way round).
+        self._llm_ok = True
 
         # Test hook: AUTO_FILE_UNDERSTANDER=mock forces deterministic mode so
         # the test suite never attempts a real model download or GPU load.
@@ -841,6 +1002,11 @@ class GemmaUnderstander:
         """Lazy load transformer model and processor."""
         if self._is_loaded or self.mock:
             return
+        if self.backend != self.BACKEND_TRANSFORMERS:
+            # Never pull a multi-GB model into memory unless the transformers
+            # backend was explicitly requested.
+            self.mock = True
+            return
 
         try:
             self._model, self._processor = _load_transformer_model(
@@ -885,7 +1051,11 @@ class GemmaUnderstander:
         if self.mock:
             return self._understand_deterministic(content, filename_hint)
 
-        # 2.5 Packaged Gemma via llama.cpp — primary neural path: fast on this
+        # 2.5 No LLM configured: deterministic heuristics only.
+        if self.backend == self.BACKEND_NONE:
+            return self._understand_deterministic(content, filename_hint)
+
+        # 2.6 Packaged Gemma via llama.cpp — primary neural path: fast on this
         # hardware and supports vision for scans. On-demand mode spawns the
         # server for the batch and shuts it down after idling; an external
         # server (llama_url) is used as-is. Any failure falls straight to the
@@ -893,6 +1063,7 @@ class GemmaUnderstander:
         # transformers route.
         if self._server_mgr is not None:
             if not self._server_mgr.ensure_running():
+                self._llm_ok = False
                 return self._understand_deterministic(content, filename_hint)
             self._server_mgr.begin_request()
             try:
@@ -901,12 +1072,14 @@ class GemmaUnderstander:
                 self._server_mgr.end_request()
             if result is not None:
                 return result
+            self._llm_ok = False
             return self._understand_deterministic(content, filename_hint)
 
         if self.llama_url:
             result = self._understand_via_llama_server(content, filename_hint)
             if result is not None:
                 return result
+            self._llm_ok = False
             return self._understand_deterministic(content, filename_hint)
 
         # 3. Model loading
@@ -943,13 +1116,7 @@ class GemmaUnderstander:
             # The model ran but understood nothing (empty or garbage output
             # that even the fallback parser got nothing from): flag for
             # review instead of renaming the file into a generic folder.
-            raw_clean = raw_output.strip()
-            generic_result = (
-                result.category_hint in {"", "Document"}
-                and result.file_description in {"", "document"}
-                and len(result.summary.strip()) < 15
-            )
-            if not raw_clean or len(raw_clean) < 20 or generic_result:
+            if not _is_informative(result, raw_output):
                 result.understood = False
 
             # Fall back to EXIF date if LLM missed date
@@ -972,8 +1139,6 @@ class GemmaUnderstander:
         assistant content, or None when the server is unreachable."""
         import base64
         import io
-        import json as _json
-        import urllib.request
 
         parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
         if image_content is not None:
@@ -982,7 +1147,7 @@ class GemmaUnderstander:
             b64 = base64.b64encode(buf.getvalue()).decode("ascii")
             parts.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
 
-        payload = _json.dumps(
+        payload = json.dumps(
             {
                 "model": "gemma-4-E2B-it",
                 "messages": [
@@ -1009,7 +1174,7 @@ class GemmaUnderstander:
         )
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
-                body = _json.loads(resp.read().decode("utf-8"))
+                body = json.loads(resp.read().decode("utf-8"))
             message = body["choices"][0]["message"]
             # Thinking-disabled servers fill content; if thinking still leaks
             # into reasoning_content, fall back to parsing that.
@@ -1032,6 +1197,7 @@ class GemmaUnderstander:
         raw_output = self._chat(prompt, content.image_content, url)
         if raw_output is None:
             return None
+        self._llm_ok = True
 
         try:
             result = parse_llm_json_response(raw_output)
@@ -1039,15 +1205,7 @@ class GemmaUnderstander:
             # Garbage check: the model ran but understood nothing (empty
             # output, or it punted to a generic/unclassified category) —
             # flag for review instead of renaming into a generic folder.
-            raw_clean = (raw_output or "").strip()
-            uninformative = result.category_hint in {
-                "",
-                "Document",
-                "Misc",
-                "Unknown",
-                "Uncategorized",
-            }
-            if not raw_clean or uninformative:
+            if not _is_informative(result, raw_output):
                 result.understood = False
 
             if result.content_date is None and content.exif_date:
@@ -1060,8 +1218,23 @@ class GemmaUnderstander:
 
     @property
     def has_llm_routing(self) -> bool:
-        """True when an LLM is available for folder routing."""
-        return not self.mock and (self.llama_url is not None or self._server_mgr is not None)
+        """True when an LLM is available for folder routing.
+
+        The flag is shared by the understanding and the routing path: when the
+        server could not be reached, both fall back to the deterministic
+        router, so a file is never understood by the LLM and routed by
+        heuristics (or the other way round).
+        """
+        if self.mock or not self._llm_ok:
+            return False
+        if self._server_mgr is not None:
+            return self._server_mgr.available
+        return self.llama_url is not None
+
+    def shutdown_server(self) -> None:
+        """Stop the on-demand llama-server, if this understander owns one."""
+        if self._server_mgr is not None:
+            self._server_mgr.shutdown()
 
     def route_with_llama(
         self,
@@ -1071,6 +1244,7 @@ class GemmaUnderstander:
         content_date: str | None,
         folder_choices: list[str],
         url: str | None = None,
+        dynamic_folders: list[str] | None = None,
     ) -> tuple[str, str | None]:
         """Ask the LLM to choose a destination folder from the real tree.
 
@@ -1082,6 +1256,17 @@ class GemmaUnderstander:
         if not folder_choices:
             return "unreachable", None
         listing = "\n".join(f"- {p}" for p in folder_choices)
+        dynamic_note = ""
+        if dynamic_folders:
+            dynamic_listing = "\n".join(f"- {p}" for p in dynamic_folders)
+            dynamic_note = (
+                "\nThe following folders accept ONE new final folder "
+                "(a vendor, company, account or case name). For those you may "
+                "answer with the listed folder plus your own name, e.g. "
+                "'Financial/Bills/Acme Corp'. For every other folder you must "
+                "answer with a path exactly as listed above.\n"
+                f"Folders that accept a new subfolder:\n{dynamic_listing}\n"
+            )
         prompt = (
             "You are a file-routing assistant for a personal document cabinet.\n"
             "Choose the single best destination folder for this document. You MUST "
@@ -1091,17 +1276,27 @@ class GemmaUnderstander:
             f"Summary: {summary or '(none)'}\n"
             f"Description: {description or '(none)'}\n"
             f"Document date: {content_date or 'unknown'}\n\n"
-            f"Available folders:\n{listing}\n\n"
+            f"Available folders:\n{listing}\n"
+            f"{dynamic_note}\n"
             'Respond with ONLY JSON: {"folder": "<path from the list or NONE>"}'
         )
-        raw = self._chat(
-            prompt,
-            None,
-            url or (self._server_mgr.url if self._server_mgr else None),
-            max_tokens=400,
-        )
+        manager = self._server_mgr
+        if manager is not None:
+            manager.begin_request()
+        try:
+            raw = self._chat(
+                prompt,
+                None,
+                url or (manager.url if manager else None),
+                max_tokens=400,
+            )
+        finally:
+            if manager is not None:
+                manager.end_request()
         if raw is None:
+            self._llm_ok = False
             return "unreachable", None
+        self._llm_ok = True
 
         folder = None
         cleaned = (raw or "").strip()
@@ -1253,8 +1448,13 @@ class GemmaUnderstander:
         # real evidence — a specific category derived from content, or enough
         # readable text. Scans with no extractable text and unidentifiable
         # documents are flagged so the pipeline leaves them untouched.
+        # The text thresholds are configurable: a short note should not be
+        # parked forever if the user knows their own documents.
         text_words = len(text.split())
-        text_ok = text_words >= 25 and len(text) >= 120
+        text_ok = (
+            text_words >= self.min_understanding_words
+            and len(text) >= self.min_understanding_chars
+        )
         specific_hint = category_hint not in {"", "Document", "Photo", "Audio"}
         photo_ok = category_hint == "Photo" and bool(content.exif_date)
         audio_ok = category_hint == "Audio" and bool(
