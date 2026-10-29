@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Inbox marker files that must never be sorted (folder anchors, sync placeholders)
+PLACEHOLDER_NAMES = {"do-not-move-or-delete-this-file"}
+
 
 @dataclass
 class PipelineResult:
@@ -524,12 +527,14 @@ class FilePipelineExecutor:
         else:
             candidates = [p for p in source_path.iterdir() if p.is_file()]
 
-        # Filter out hidden files / dotfiles (e.g. .DS_Store, .git)
+        # Filter out hidden files / dotfiles (e.g. .DS_Store, .git) and
+        # inbox marker placeholders that must never be sorted
         files = sorted(
             [
                 p
                 for p in candidates
                 if not p.name.startswith(".")
+                and p.name not in PLACEHOLDER_NAMES
                 and not any(part.startswith(".") for part in p.relative_to(source_path).parts)
             ],
             key=lambda p: str(p),

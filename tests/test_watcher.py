@@ -218,6 +218,57 @@ def test_watcher_non_recursive_mode_ignores_subdirectories(tmp_path: Path):
         watcher.stop()
 
 
+def test_watcher_sorts_files_already_in_inbox_at_startup(tmp_path: Path):
+    """Files present before start() (e.g. dropped while the service was down)
+    must be sorted by the startup scan, not sit forever until a new event."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    sorted_dir = tmp_path / "sorted"
+    sorted_dir.mkdir()
+
+    existing = inbox / "pre_existing.txt"
+    existing.write_text("Alpha dental medical appointment note from the clinic, cleaning and checkup completed, next visit scheduled in six months.", encoding="utf-8")
+
+    ledger = AuditLedger(tmp_path / "audit.db")
+    executor = FilePipelineExecutor(target_root=sorted_dir, audit_ledger=ledger)
+    watcher = FolderWatcher(inbox_dir=inbox, executor=executor, debounce_seconds=0.5)
+
+    watcher.start()
+    try:
+        time.sleep(1.5)
+        assert not existing.exists()
+        sorted_files = list(sorted_dir.rglob("*.txt"))
+        assert len(sorted_files) == 1
+    finally:
+        watcher.stop()
+
+
+def test_watcher_ignores_do_not_move_placeholder(tmp_path: Path):
+    """The do-not-move-or-delete-this-file placeholder must stay in the inbox,
+    even when present at startup (startup scan) or freshly created."""
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    sorted_dir = tmp_path / "sorted"
+    sorted_dir.mkdir()
+
+    placeholder = inbox / "do-not-move-or-delete-this-file"
+    placeholder.write_text("", encoding="utf-8")
+
+    ledger = AuditLedger(tmp_path / "audit.db")
+    executor = FilePipelineExecutor(target_root=sorted_dir, audit_ledger=ledger)
+    watcher = FolderWatcher(inbox_dir=inbox, executor=executor, debounce_seconds=0.4)
+
+    watcher.start()
+    try:
+        # Rewrite it after start so the created/modified event path is covered too
+        placeholder.write_text("", encoding="utf-8")
+        time.sleep(1.2)
+        assert placeholder.exists()
+        assert not placeholder.name in {p.name for p in sorted_dir.rglob("*")}
+    finally:
+        watcher.stop()
+
+
 def test_watcher_context_manager(tmp_path: Path):
     """Verify FolderWatcher context manager starts and stops cleanly."""
     inbox = tmp_path / "inbox"

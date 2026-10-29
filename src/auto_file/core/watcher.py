@@ -19,7 +19,7 @@ from watchdog.events import (
 )
 from watchdog.observers import Observer
 
-from auto_file.core.executor import FilePipelineExecutor, PipelineResult
+from auto_file.core.executor import FilePipelineExecutor, PipelineResult, PLACEHOLDER_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,10 @@ class FolderWatcher:
 
     def is_ignored(self, path: Path) -> bool:
         """Check whether a path should be ignored (hidden file or temporary extension)."""
+        # 0. Marker files that anchor the inbox and must never be sorted
+        if path.name in PLACEHOLDER_NAMES:
+            return True
+
         # 1. Ignored extensions
         if path.suffix.lower() in IGNORED_EXTENSIONS:
             return True
@@ -146,29 +150,29 @@ class FolderWatcher:
 
         return False
 
-    def _queue_file(self, path: Path) -> None:
-        """Queue or reset debounce timer for a file path."""
+    def _queue_file(self, path: Path) -> bool:
+        """Queue or reset debounce timer for a file path. Returns True when queued."""
         try:
             resolved_path = path.resolve()
         except OSError:
-            return
+            return False
 
         # Boundary check: ensure path is inside inbox_dir
         if not resolved_path.is_relative_to(self.inbox_dir):
-            return
+            return False
 
         if self.is_ignored(resolved_path):
-            return
+            return False
 
         if not self.recursive:
             try:
                 if resolved_path.parent != self.inbox_dir:
-                    return
+                    return False
             except Exception:
-                return
+                return False
 
         if not resolved_path.exists() or not resolved_path.is_file():
-            return
+            return False
 
         try:
             current_size = resolved_path.stat().st_size
@@ -178,6 +182,28 @@ class FolderWatcher:
         target_time = time.time() + self.debounce_seconds
         with self._lock:
             self._pending[resolved_path] = (target_time, current_size)
+        return True
+
+    def _scan_existing_files(self) -> int:
+        """Queue files already sitting in the inbox at startup.
+
+        Watchdog only reports events that happen while the observer is
+        running, so files present before start() (e.g. dropped while the
+        service was down or restarting) would otherwise sit unsorted
+        forever. Returns the number of files queued.
+        """
+        pattern = "**/*" if self.recursive else "*"
+        try:
+            candidates = list(self.inbox_dir.glob(pattern))
+        except OSError as exc:
+            logger.warning("Startup inbox scan failed: %s", exc)
+            return 0
+
+        queued = 0
+        for path in candidates:
+            if self._queue_file(path):
+                queued += 1
+        return queued
 
     def _remove_file(self, path: Path) -> None:
         """Remove a file from pending queue (e.g. deleted or moved away)."""
@@ -277,6 +303,11 @@ class FolderWatcher:
         )
         self._worker_thread.start()
         self._is_running = True
+
+        # Re-scan the inbox so files present before start() get sorted too.
+        queued = self._scan_existing_files()
+        if queued:
+            logger.info("Startup scan queued %d existing file(s) for sorting", queued)
 
     def stop(self, timeout: float = 5.0) -> None:
         """Stop watchdog observer and worker thread cleanly."""

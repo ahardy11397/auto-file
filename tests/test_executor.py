@@ -274,6 +274,26 @@ def test_pipeline_batch_process_directory(tmp_path: Path):
     assert history[0]["failed_files"] == 0
 
 
+def test_pipeline_batch_skips_do_not_move_placeholder(tmp_path: Path):
+    """Manual sort must leave the do-not-move-or-delete-this-file placeholder in the inbox."""
+    source_dir = tmp_path / "inbox"
+    source_dir.mkdir()
+    target_dir = tmp_path / "sorted"
+    target_dir.mkdir()
+
+    placeholder = source_dir / "do-not-move-or-delete-this-file"
+    placeholder.write_text("", encoding="utf-8")
+    (source_dir / "stmt.txt").write_text("Bank statement for Chase account 2026-01-15", encoding="utf-8")
+
+    ledger = AuditLedger(tmp_path / "audit.db")
+    executor = FilePipelineExecutor(target_root=target_dir, audit_ledger=ledger)
+
+    results = executor.process_directory(source_dir, dry_run=False)
+    assert len(results) == 1
+    assert results[0].original_path.name == "stmt.txt"
+    assert placeholder.exists()
+
+
 def test_pipeline_batch_process_directory_dry_run(tmp_path: Path):
     """Verify batch processing in dry-run mode leaves all files intact."""
     source_dir = tmp_path / "inbox"
